@@ -6,6 +6,7 @@ import {
   AccountNotFoundError,
   AuthFileMissingError,
   InvalidAccountNameError,
+  LoginIncompleteError,
 } from "./errors";
 
 const ACCOUNT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -48,6 +49,19 @@ export class AccountService {
     await this.ensureDir(accountsDir);
     const destination = this.accountFilePath(name);
     await fsp.copyFile(authPath, destination);
+    return name;
+  }
+
+  public async importAccount(rawName: string, sourceAuthPath: string): Promise<string> {
+    const name = this.normalizeAccountName(rawName);
+
+    if (!(await this.pathExists(sourceAuthPath))) {
+      throw new LoginIncompleteError();
+    }
+
+    await this.ensureDir(accountsDir);
+    const destination = this.accountFilePath(name);
+    await fsp.copyFile(sourceAuthPath, destination);
     return name;
   }
 

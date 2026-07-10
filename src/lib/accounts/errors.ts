@@ -35,6 +35,15 @@ export class InvalidAccountNameError extends CodexAuthError {
   }
 }
 
+export class LoginIncompleteError extends CodexAuthError {
+  constructor() {
+    super(
+      "The login flow finished without producing an auth.json, " +
+        "so no account was saved. Try again and complete the browser login.",
+    );
+  }
+}
+
 export class PromptCancelledError extends CodexAuthError {
   constructor() {
     super("No account selected. The operation was cancelled.");

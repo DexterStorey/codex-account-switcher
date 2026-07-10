@@ -25,6 +25,9 @@ npm i -g codex-auth
 # save the current logged-in token as a named account
 codex-auth save <name>
 
+# log into ANOTHER account and save it, without logging out of the current one
+codex-auth add <name>
+
 # switch active account (symlinks on macOS/Linux; copies on Windows)
 codex-auth use <name>
 
@@ -41,6 +44,7 @@ codex-auth current
 ### Command reference
 
 - `codex-auth save <name>` – Validates `<name>`, ensures `auth.json` exists, then snapshots it to `~/.codex/accounts/<name>.json`.
+- `codex-auth add <name>` – Runs `codex login` with `CODEX_HOME` pointed at a temporary directory, so the browser auth flow never touches your active `~/.codex/auth.json` (useful while a Codex session is running). The resulting tokens are saved to `~/.codex/accounts/<name>.json` and the temp directory is removed.
 - `codex-auth use [name]` – Accepts a name or launches an interactive selector with the current account pre-selected. Copies on Windows, creates a symlink elsewhere, and records the active name.
 - `codex-auth list` – Lists all saved snapshots alphabetically and marks the active one with `*`.
 - `codex-auth current` – Prints the active account name, or a friendly message if none is active.

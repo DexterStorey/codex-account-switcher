@@ -6,6 +6,7 @@ export {
   AuthFileMissingError,
   CodexAuthError,
   InvalidAccountNameError,
+  LoginIncompleteError,
   NoAccountsSavedError,
   PromptCancelledError,
 } from "./errors";
