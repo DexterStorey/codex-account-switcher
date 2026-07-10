@@ -1,11 +1,11 @@
 import { Args } from "@oclif/core";
-import { BaseCommand } from "../lib/base-command";
-import { codexAuthProvider } from "../lib/auth/codex";
-import { doAdd } from "../lib/cli/provider-commands";
+import { BaseCommand } from "../../lib/base-command";
+import { claudeAuthProvider } from "../../lib/auth/claude";
+import { doAdd } from "../../lib/cli/provider-commands";
 
 export default class AddCommand extends BaseCommand {
   static description =
-    "Log into another Codex account and save it, without touching the active ~/.codex/auth.json";
+    "Log into another Claude Code account and save it (snapshots current, logs in, restores current)";
 
   static args = {
     name: Args.string({ name: "name", required: true, description: "Name for the new account" }),
@@ -14,7 +14,7 @@ export default class AddCommand extends BaseCommand {
   async run(): Promise<void> {
     await this.runSafe(async () => {
       const { args } = await this.parse(AddCommand);
-      await doAdd(this, codexAuthProvider, args.name as string);
+      await doAdd(this, claudeAuthProvider, args.name as string);
     });
   }
 }

@@ -1,10 +1,10 @@
 import { Args } from "@oclif/core";
-import { BaseCommand } from "../lib/base-command";
-import { codexAuthProvider } from "../lib/auth/codex";
-import { doSave } from "../lib/cli/provider-commands";
+import { BaseCommand } from "../../lib/base-command";
+import { piAuthProvider } from "../../lib/auth/pi";
+import { doSave, doAdd, doUse, doList, doCurrent } from "../../lib/cli/provider-commands";
 
 export default class SaveCommand extends BaseCommand {
-  static description = "Save the current ~/.codex/auth.json as a named account";
+  static description = "Save the current pi credentials as a named account";
 
   static args = {
     name: Args.string({ name: "name", required: true, description: "Name for the account snapshot" }),
@@ -13,7 +13,7 @@ export default class SaveCommand extends BaseCommand {
   async run(): Promise<void> {
     await this.runSafe(async () => {
       const { args } = await this.parse(SaveCommand);
-      await doSave(this, codexAuthProvider, args.name as string);
+      await doSave(this, piAuthProvider, args.name as string);
     });
   }
 }

@@ -1,5 +1,6 @@
 import { Args, Flags } from "@oclif/core";
 import { BaseCommand } from "../lib/base-command";
+import { codexAuthProvider } from "../lib/auth/codex";
 import {
   CodexSession,
   sessionService,
@@ -77,8 +78,8 @@ export default class SwitchCommand extends BaseCommand {
         await sessionService.killAndWait(session.pid);
       }
 
-      const activated = await this.accounts.useAccount(args.account as string);
-      this.log(`Switched Codex auth to "${activated}".`);
+      const activated = await codexAuthProvider.activate(args.account as string);
+      this.log(`Switched Codex auth to "${activated.name}".`);
 
       const manualResumes: CodexSession[] = [];
       for (const session of targets) {

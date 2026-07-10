@@ -10,7 +10,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test dist/**/*.test.js"
   },
   "engines": {
     "node": ">=18"
@@ -49,6 +50,15 @@
   },
   "oclif": {
     "bin": "codex-auth",
-    "commands": "./dist/commands"
+    "commands": "./dist/commands",
+    "topicSeparator": " ",
+    "topics": {
+      "claude": {
+        "description": "Claude Code account management"
+      },
+      "pi": {
+        "description": "pi account management"
+      }
+    }
   }
 }

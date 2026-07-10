@@ -1,12 +1,13 @@
 import { BaseCommand } from "../lib/base-command";
+import { codexAuthProvider } from "../lib/auth/codex";
+import { doCurrent } from "../lib/cli/provider-commands";
 
 export default class CurrentCommand extends BaseCommand {
-  static description = "Show the currently active account name";
+  static description = "Show the currently active Codex account";
 
   async run(): Promise<void> {
     await this.runSafe(async () => {
-      const name = await this.accounts.getCurrentAccountName();
-      this.log(name ?? "No Codex account is active yet.");
+      await doCurrent(this, codexAuthProvider);
     });
   }
 }
