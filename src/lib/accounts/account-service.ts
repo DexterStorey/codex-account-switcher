@@ -75,15 +75,42 @@ export class AccountService {
 
     await this.ensureDir(accountsDir);
     await this.ensureDir(codexDir);
+    await this.syncBackActiveAccount();
 
-    if (process.platform === "win32") {
-      await fsp.copyFile(source, authPath);
-    } else {
-      await this.replaceSymlink(source, authPath);
-    }
+    // Copy (never symlink): Codex rewrites auth.json in place when it
+    // refreshes tokens, and an in-place write through a symlink would
+    // corrupt the snapshot of whichever account is active.
+    await this.removeIfExists(authPath);
+    await fsp.copyFile(source, authPath);
 
     await this.writeCurrentName(name);
     return name;
+  }
+
+  /**
+   * Copies the live auth.json back to the active account's snapshot, so
+   * refreshed (rotated) tokens are not lost when switching away.
+   */
+  public async syncBackActiveAccount(): Promise<string | null> {
+    const current = await this.getCurrentAccountName();
+    if (!current) return null;
+    if (!(await this.pathExists(authPath))) return null;
+
+    const snapshot = this.accountFilePath(current);
+    const stat = await fsp.lstat(authPath);
+    if (stat.isSymbolicLink()) {
+      const resolved = path.resolve(
+        path.dirname(authPath),
+        await fsp.readlink(authPath),
+      );
+      if (resolved === path.resolve(snapshot)) {
+        return current; // legacy symlink already points at the snapshot
+      }
+    }
+
+    await this.ensureDir(accountsDir);
+    await fsp.copyFile(authPath, snapshot);
+    return current;
   }
 
   private accountFilePath(name: string): string {
