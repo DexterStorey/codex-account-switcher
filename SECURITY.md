@@ -3,7 +3,7 @@
 ## Secret storage
 
 - OpenAI OAuth documents are stored in the macOS Keychain service
-  `com.rubriclabs.codex-account-switcher` under opaque UUID references.
+  `com.rubriclabs.tokmax` under opaque UUID references.
 - Claude Code credentials remain in Claude Code's own Keychain item for each isolated
   `CLAUDE_CONFIG_DIR`. If Claude falls back to `.credentials.json`, the adapter requires no
   group/other permission bits before it will read the file.
@@ -27,7 +27,7 @@ The local manager socket and Codex capability token are not remote APIs. Do not 
 network bridge, shared container volume, or permissive socket proxy.
 
 Versions before this rebuild stored account snapshots as plaintext under `~/.codex-auth/codex` and
-`~/.codex-auth/claude`. `codex-auth doctor` detects those directories. Re-register and verify the
+`~/.codex-auth/claude`. `tokmax doctor` detects those directories. Re-register and verify the
 accounts in the Keychain-backed store before explicitly removing the legacy snapshots.
 
 ## Provider boundaries

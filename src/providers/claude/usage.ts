@@ -5,16 +5,44 @@ import type { FetchImplementation } from "../../http.ts";
 
 const UsageWindowSchema = z
   .object({
-    utilization: z.number().min(0).max(1),
-    resets_at: z.union([z.string(), z.number()]).nullable().optional(),
-    limit_dollars: z.number().nonnegative().optional(),
-    used_dollars: z.number().nonnegative().optional(),
-    remaining_dollars: z.number().nonnegative().optional(),
+    utilization: z.number().min(0),
+    resets_at: z.union([z.string(), z.number()]).nullish(),
+    limit_dollars: z.number().nonnegative().nullish(),
+    used_dollars: z.number().nonnegative().nullish(),
+    remaining_dollars: z.number().nonnegative().nullish(),
+  })
+  .passthrough();
+
+const LimitScopeSchema = z
+  .object({
+    model: z
+      .object({ id: z.string().nullish(), display_name: z.string().nullish() })
+      .passthrough()
+      .nullish(),
+    surface: z
+      .union([
+        z.string(),
+        z.object({ id: z.string().nullish(), display_name: z.string().nullish() }).passthrough(),
+      ])
+      .nullish(),
+  })
+  .passthrough();
+
+const LimitSchema = z
+  .object({
+    kind: z.string().min(1),
+    group: z.string().nullish(),
+    percent: z.number().min(0),
+    severity: z.string().nullish(),
+    resets_at: z.union([z.string(), z.number()]).nullish(),
+    scope: LimitScopeSchema.nullish(),
+    is_active: z.boolean().nullish(),
   })
   .passthrough();
 
 const ClaudeUsageResponseSchema = z
   .object({
+    limits: z.array(LimitSchema).nullish(),
     five_hour: UsageWindowSchema.nullish(),
     seven_day: UsageWindowSchema.nullish(),
     seven_day_opus: UsageWindowSchema.nullish(),
@@ -36,6 +64,15 @@ function resetTimestamp(value: string | number | null | undefined): string | nul
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
+// The endpoint has shipped both fractions (0.94 for 94%) and whole percentages
+// (9.0 for 9%). Values above 1 can only be percentages; values at or below 1
+// are treated as fractions, which at worst over-reports a sub-1% reading and
+// never hides a nearly exhausted window.
+function normalizePercent(utilization: number): number {
+  const percent = utilization <= 1 ? utilization * 100 : utilization;
+  return Math.min(100, percent);
+}
+
 function normalizeWindow(
   id: string,
   label: string,
@@ -44,14 +81,45 @@ function normalizeWindow(
   return {
     id,
     label,
-    usedPercent: source.utilization * 100,
+    usedPercent: normalizePercent(source.utilization),
     resetAt: resetTimestamp(source.resets_at),
     kind:
-      id.includes("oauth_apps") || id.includes("extra_usage") || source.limit_dollars !== undefined
+      id.includes("oauth_apps") || id.includes("extra_usage") || source.limit_dollars != null
         ? "spend"
         : "hard",
   };
 }
+
+function limitScopeName(limit: z.infer<typeof LimitSchema>): string | null {
+  const surface = limit.scope?.surface;
+  const surfaceName = typeof surface === "string" ? surface : surface?.display_name;
+  return limit.scope?.model?.display_name ?? surfaceName ?? limit.scope?.model?.id ?? null;
+}
+
+function limitWindow(limit: z.infer<typeof LimitSchema>): UsageWindow {
+  const scopeName = limitScopeName(limit);
+  const labels: Record<string, string> = {
+    session: "5h session",
+    weekly_all: "7 day · all models",
+    weekly_scoped: `7 day · ${scopeName ?? "scoped"}`,
+  };
+  const fallbackLabel = limit.kind
+    .split("_")
+    .filter((part) => part.length > 0)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
+  return {
+    id: scopeName === null ? limit.kind : `${limit.kind}:${scopeName.toLowerCase()}`,
+    label:
+      labels[limit.kind] ??
+      (scopeName === null ? fallbackLabel : `${fallbackLabel} · ${scopeName}`),
+    usedPercent: Math.min(100, limit.percent),
+    resetAt: resetTimestamp(limit.resets_at),
+    kind: "hard",
+  };
+}
+
+const exhaustedSeverities = new Set(["exceeded", "blocked", "at_limit"]);
 
 export async function fetchClaudeUsage(input: {
   accountId: string;
@@ -88,17 +156,23 @@ export async function fetchClaudeUsage(input: {
     );
   }
   const body = ClaudeUsageResponseSchema.parse(await response.json());
+  const limits = body.limits ?? [];
+  const windows: UsageWindow[] = limits.map(limitWindow);
+  const coveredIds = new Set(windows.map((window) => window.id));
   const definitions = [
-    ["five_hour", "5 hour", body.five_hour],
-    ["seven_day", "7 day", body.seven_day],
-    ["seven_day_opus", "7 day · Opus", body.seven_day_opus],
-    ["seven_day_sonnet", "7 day · Sonnet", body.seven_day_sonnet],
-    ["seven_day_oauth_apps", "7 day · OAuth apps", body.seven_day_oauth_apps],
+    ["five_hour", "5 hour", "session", body.five_hour],
+    ["seven_day", "7 day", "weekly_all", body.seven_day],
+    ["seven_day_opus", "7 day · Opus", null, body.seven_day_opus],
+    ["seven_day_sonnet", "7 day · Sonnet", null, body.seven_day_sonnet],
+    ["seven_day_oauth_apps", "7 day · OAuth apps", null, body.seven_day_oauth_apps],
   ] as const;
-  const windows = definitions.flatMap(([id, label, window]) =>
-    window == null ? [] : [normalizeWindow(id, label, window)],
-  );
-  const knownWindowIds = new Set<string>(definitions.map(([id]) => id));
+  for (const [id, label, limitEquivalent, window] of definitions) {
+    if (window == null || (limitEquivalent !== null && coveredIds.has(limitEquivalent))) {
+      continue;
+    }
+    windows.push(normalizeWindow(id, label, window));
+  }
+  const knownWindowIds = new Set<string>([...definitions.map(([id]) => id), "limits"]);
   for (const [id, value] of Object.entries(body)) {
     if (knownWindowIds.has(id)) {
       continue;
@@ -119,6 +193,10 @@ export async function fetchClaudeUsage(input: {
     observedAt: new Date().toISOString(),
     source: "claudeUsageEndpoint",
     windows,
-    hardLimitReached: windows.some((window) => window.kind === "hard" && window.usedPercent >= 100),
+    hardLimitReached:
+      windows.some((window) => window.kind === "hard" && window.usedPercent >= 100) ||
+      limits.some(
+        (limit) => limit.severity != null && exhaustedSeverities.has(limit.severity.toLowerCase()),
+      ),
   };
 }

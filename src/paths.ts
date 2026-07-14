@@ -18,7 +18,11 @@ export const ApplicationPathsSchema = z.object({
 export type ApplicationPaths = z.infer<typeof ApplicationPathsSchema>;
 
 export function applicationPaths(environment: NodeJS.ProcessEnv = process.env): ApplicationPaths {
-  const root = resolve(environment.CODEX_AUTH_HOME ?? join(homedir(), ".codex-auth"));
+  // The state home predates the tokmax name; existing installations keep it
+  // because the Claude profile Keychain items are keyed to these paths.
+  const root = resolve(
+    environment.TOKMAX_HOME ?? environment.CODEX_AUTH_HOME ?? join(homedir(), ".codex-auth"),
+  );
   const runtime = join(root, "runtime");
   const claudeProfiles = join(root, "profiles", "claude");
 

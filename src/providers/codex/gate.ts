@@ -168,7 +168,7 @@ export async function startCodexDispatchGate(input: {
             id: initial.id,
             error: {
               code: -32090,
-              message: "Managed Codex authentication is controlled by codex-auth",
+              message: "Managed Codex authentication is controlled by tokmax",
             },
           }),
         );

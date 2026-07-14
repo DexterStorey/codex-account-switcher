@@ -145,7 +145,7 @@ export async function registerCodexAccount(input: {
   dependencies?: CodexLoginDependencies;
 }): Promise<Account> {
   const dependencies = input.dependencies ?? defaultCodexLoginDependencies();
-  const temporaryHome = await dependencies.createTemporaryDirectory("codex-auth-register-");
+  const temporaryHome = await dependencies.createTemporaryDirectory("tokmax-register-");
   try {
     const exitCode = await dependencies.run(
       ["codex", "login", "-c", 'cli_auth_credentials_store="file"'],

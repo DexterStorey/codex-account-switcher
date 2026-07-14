@@ -1,11 +1,11 @@
 {
-  "name": "codex-account-switcher",
-  "version": "0.2.0",
+  "name": "tokmax",
+  "version": "0.3.0",
   "description": "A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "codex-auth": "dist/index.js"
+    "tokmax": "dist/index.js"
   },
   "main": "dist/index.js",
   "scripts": {

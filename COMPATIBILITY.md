@@ -14,8 +14,8 @@ not public APIs. Compatibility is explicit and conservative.
 Before updating a native client:
 
 1. Run `bun run check`.
-2. Run `codex-auth doctor`.
-3. Register a disposable test profile in an isolated `CODEX_AUTH_HOME`.
+2. Run `tokmax doctor`.
+3. Register a disposable test profile in an isolated `TOKMAX_HOME`.
 4. Confirm its identity and all usage windows.
 5. Start one managed idle session and switch generations twice.
 6. Confirm the session's next request uses the selected upstream account.

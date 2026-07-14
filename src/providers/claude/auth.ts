@@ -424,7 +424,7 @@ export async function runManagedClaude(
         env: {
           ...process.env,
           CLAUDE_CONFIG_DIR: paths.claudeActiveProfile,
-          CODEX_AUTH_RUNTIME_PID: String(process.pid),
+          TOKMAX_RUNTIME_PID: String(process.pid),
         },
         stdin: "inherit",
         stdout: "inherit",

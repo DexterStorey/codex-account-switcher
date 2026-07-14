@@ -176,9 +176,12 @@ command-line argument.
 
 ## Usage and health
 
-The normalized unit is `usedPercent` in the inclusive range `0..100`. Anthropic endpoint fractions are
-multiplied by 100 exactly once. Every window includes a stable ID, label, reset timestamp, and semantic
-kind (`hard`, `soft`, or `spend`).
+The normalized unit is `usedPercent` in the inclusive range `0..100`. The Anthropic usage endpoint's
+`limits` array is the authoritative source; its `percent` values are used directly. Legacy window
+objects have shipped both fractions and whole percentages, so a `utilization` at or below 1 is treated
+as a fraction and anything above 1 as a percentage — an ambiguity that can only over-report a sub-1%
+reading, never hide an exhausted window. Every window includes a stable ID, label, reset timestamp,
+and semantic kind (`hard`, `soft`, or `spend`).
 
 Codex usage is sampled three times and grouped by reset bucket. The majority bucket wins and its
 highest utilization is retained, preventing an intermittent unrelated low-usage bucket from becoming

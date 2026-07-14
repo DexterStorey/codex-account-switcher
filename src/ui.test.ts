@@ -91,14 +91,20 @@ describe("dashboard", () => {
     });
 
     const rendered = renderDashboard(snapshot, new Date(sampledAt));
-    expect(rendered).toContain("CODEX · CLAUDE · PI LIMIT CONTROL");
-    expect(rendered).toContain("94.6%");
+    expect(rendered).toContain("tokmax");
+    expect(rendered).toContain("OpenAI · Codex + Pi");
+    expect(rendered).toContain("95%");
     expect(rendered).toContain("Code review");
     expect(rendered).toContain("STALE");
     expect(rendered).toContain("login expiring");
     expect(rendered).not.toContain(
       "an-excessively-long-account-email-address-for-dashboard@example.test",
     );
-    expect(rendered.match(/an-excessively/g)).toHaveLength(1);
+    // Bounded copies appear on the account row and in the relogin hint.
+    expect(rendered.match(/an-excessively/g)).toHaveLength(2);
+    // Plain rendering stays byte-clean for pipes and tests; color is opt-in.
+    expect(rendered).not.toContain("[");
+    const colored = renderDashboard(snapshot, new Date(sampledAt), { color: true });
+    expect(colored).toContain("[31m");
   });
 });

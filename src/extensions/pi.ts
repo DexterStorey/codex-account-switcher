@@ -102,7 +102,7 @@ function delegateOpenAiCodexStream(
 }
 
 function managerSocketPath(): string {
-  return process.env.CODEX_AUTH_SOCKET ?? join(homedir(), ".codex-auth", "runtime", "manager.sock");
+  return process.env.TOKMAX_SOCKET ?? join(homedir(), ".codex-auth", "runtime", "manager.sock");
 }
 
 async function managerRequest(method: string, params: unknown): Promise<unknown> {
@@ -146,7 +146,7 @@ export default function managedPiExtension(pi: PiExtensionApi): void {
   const managedStream = createManagedCodexStreamSimple(() => credential, delegateOpenAiCodexStream);
   pi.registerProvider("openai-codex", {
     api: "openai-codex-responses",
-    apiKey: "managed-by-codex-auth",
+    apiKey: "managed-by-tokmax",
     streamSimple: managedStream,
   });
 

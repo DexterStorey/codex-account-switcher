@@ -76,29 +76,34 @@ function option(arguments_: readonly string[], name: string): string | undefined
 }
 
 function help(): string {
-  return `Codex Account Switcher
+  return `tokmax — accounts, rate limits, and safe switching for Codex, Claude Code, and Pi
 
-Usage:
-  codex-auth                              live rate-limit dashboard
-  codex-auth account add codex
-  codex-auth account add claude [--email user@example.com]
-  codex-auth account reauthenticate <codex|claude> <email-or-id>
-  codex-auth account list
-  codex-auth switch <codex|claude> <email-or-id>
-  codex-auth auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]
-  codex-auth refresh
-  codex-auth status [--json]
-  codex-auth codex [codex arguments...]    launch a managed Codex TUI
-  codex-auth claude [claude arguments...]  launch managed Claude Code
-  codex-auth pi [pi arguments...]          launch Pi with safe Codex switching
-  codex-auth daemon <start|run|stop|status>
-  codex-auth doctor
+Accounts
+  tokmax codex login                      sign in another OpenAI account
+  tokmax claude login [--email a@b.com]   sign in another Anthropic account
+  tokmax <codex|claude> relogin <email>   repair an expired login
+  tokmax list                             all accounts and their health
 
-Registration is isolated and never changes a running session. Switching only
-controls sessions launched through these managed wrappers. Automatic rotation
-is off by default and --authorized records your confirmation that the provider
-permits this use of your accounts. Reauthentication requires a stopped manager
-and no live managed sessions so credential replacement is atomic.`;
+Sessions
+  tokmax codex [arguments...]             launch a managed Codex TUI
+  tokmax claude [arguments...]            launch managed Claude Code
+  tokmax pi [arguments...]                launch Pi with safe Codex switching
+
+Limits
+  tokmax                                  live dashboard
+  tokmax status [--json]                  one-shot snapshot
+  tokmax refresh                          re-probe every account now
+  tokmax switch <codex|claude> <email>    move managed sessions to an account
+  tokmax auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]
+
+Plumbing
+  tokmax daemon <start|stop|status>       the manager that owns probes and switches
+  tokmax doctor                           verify local tools and the manager boundary
+
+Logins are isolated and never change a running session. Switching only controls
+sessions launched through tokmax wrappers. Automatic rotation is off by default;
+--authorized records your confirmation that your provider agreement permits it.
+Relogin requires a stopped manager so credential replacement stays atomic.`;
 }
 
 async function createContext(): Promise<ApplicationContext> {
@@ -184,7 +189,7 @@ async function addAccount(
 ): Promise<void> {
   const providerArgument = arguments_[0];
   if (providerArgument === undefined) {
-    throw new ApplicationError("USAGE", "Usage: account add <codex|claude> [--email address]");
+    throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> login [--email address]");
   }
   const provider = providerFromCli(providerArgument);
   const registration = parseRegistrationOptions(provider, arguments_.slice(1));
@@ -237,7 +242,7 @@ function parseRegistrationOptions(
   switch (provider) {
     case "openai":
       if (arguments_.length !== 0) {
-        throw new ApplicationError("USAGE", "Usage: account add codex");
+        throw new ApplicationError("USAGE", "Usage: tokmax codex login");
       }
       return { email: undefined };
     case "anthropic":
@@ -249,7 +254,7 @@ function parseRegistrationOptions(
           if (argument?.startsWith("--email=") !== true) {
             throw new ApplicationError(
               "USAGE",
-              "Usage: account add claude [--email user@example.com]",
+              "Usage: tokmax claude login [--email user@example.com]",
             );
           }
           return { email: AccountEmailSchema.parse(argument.slice("--email=".length)) };
@@ -258,14 +263,14 @@ function parseRegistrationOptions(
           if (arguments_[0] !== "--email" || arguments_[1] === undefined) {
             throw new ApplicationError(
               "USAGE",
-              "Usage: account add claude [--email user@example.com]",
+              "Usage: tokmax claude login [--email user@example.com]",
             );
           }
           return { email: AccountEmailSchema.parse(arguments_[1]) };
         default:
           throw new ApplicationError(
             "USAGE",
-            "Usage: account add claude [--email user@example.com]",
+            "Usage: tokmax claude login [--email user@example.com]",
           );
       }
   }
@@ -287,10 +292,7 @@ async function reauthenticateAccount(
   const providerArgument = arguments_[0];
   const accountReference = arguments_[1];
   if (providerArgument === undefined || accountReference === undefined) {
-    throw new ApplicationError(
-      "USAGE",
-      "Usage: account reauthenticate <codex|claude> <email-or-id>",
-    );
+    throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> relogin <email-or-id>");
   }
   const provider = providerFromCli(providerArgument);
   const lock = await acquireDaemonLock(context.paths.managerLock);
@@ -298,7 +300,7 @@ async function reauthenticateAccount(
     if (await managerAvailable(context.paths.managerSocket)) {
       throw new ApplicationError(
         "DAEMON_RUNNING",
-        "Stop the manager before reauthentication: codex-auth daemon stop",
+        "Stop the manager before relogin: tokmax daemon stop",
       );
     }
     const liveSession = context.store.listRuntimeSessions().find((session) => {
@@ -404,7 +406,7 @@ async function switchAccount(
   const providerArgument = arguments_[0];
   const accountReference = arguments_[1];
   if (providerArgument === undefined || accountReference === undefined) {
-    throw new ApplicationError("USAGE", "Usage: switch <codex|claude> <email-or-id>");
+    throw new ApplicationError("USAGE", "Usage: tokmax switch <codex|claude> <email-or-id>");
   }
   const provider = providerFromCli(providerArgument);
   const target = resolveAccount(context.store, provider, accountReference);
@@ -422,7 +424,7 @@ async function configureAutomation(
   if (providerArgument === undefined || (mode !== "on" && mode !== "off")) {
     throw new ApplicationError(
       "USAGE",
-      "Usage: auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]",
+      "Usage: tokmax auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]",
     );
   }
   const providers =
@@ -459,7 +461,7 @@ async function managedPi(
   const sourceExtension = join(import.meta.dir, "extensions", "pi.ts");
   const extension = (await Bun.file(builtExtension).exists()) ? builtExtension : sourceExtension;
   return Bun.spawn(["pi", "--extension", extension, ...arguments_], {
-    env: { ...process.env, CODEX_AUTH_SOCKET: context.paths.managerSocket },
+    env: { ...process.env, TOKMAX_SOCKET: context.paths.managerSocket },
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -474,7 +476,7 @@ async function runClaudeHook(
     .enum(["session-start", "turn-begin", "turn-end", "session-end"])
     .parse(arguments_[0]);
   const input = ClaudeHookInputSchema.parse(JSON.parse(await Bun.stdin.text()));
-  const processId = z.coerce.number().int().positive().parse(process.env.CODEX_AUTH_RUNTIME_PID);
+  const processId = z.coerce.number().int().positive().parse(process.env.TOKMAX_RUNTIME_PID);
   const params = { sessionId: input.session_id, processId };
   try {
     switch (action) {
@@ -551,7 +553,7 @@ async function doctor(context: ApplicationContext): Promise<void> {
     `${(await managerAvailable(context.paths.managerSocket)) ? "running" : "stopped"}  manager daemon\n`,
   );
   process.stdout.write(`state     ${context.paths.database}\n`);
-  process.stdout.write("boundary  only sessions launched through codex-auth are switchable\n");
+  process.stdout.write("boundary  only sessions launched through tokmax are switchable\n");
   const legacyDirectories = [join(context.paths.root, "codex"), join(context.paths.root, "claude")];
   const legacyDetected = await Promise.all(
     legacyDirectories.map((directory) =>
@@ -623,6 +625,14 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         return 0;
       }
       case "codex":
+        if (arguments_[1] === "login") {
+          await addAccount(context, ["codex", ...arguments_.slice(2)]);
+          return 0;
+        }
+        if (arguments_[1] === "relogin") {
+          await reauthenticateAccount(context, ["codex", ...arguments_.slice(2)]);
+          return 0;
+        }
         await ensureDaemon(context);
         await managerRequest({
           socketPath: context.paths.managerSocket,
@@ -632,10 +642,27 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         });
         return runManagedCodex(context.paths, arguments_.slice(1));
       case "claude":
+        if (arguments_[1] === "login") {
+          await addAccount(context, ["claude", ...arguments_.slice(2)]);
+          return 0;
+        }
+        if (arguments_[1] === "relogin") {
+          await reauthenticateAccount(context, ["claude", ...arguments_.slice(2)]);
+          return 0;
+        }
         await ensureDaemon(context);
         return runManagedClaude(context.paths, arguments_.slice(1));
       case "pi":
+        if (arguments_[1] === "login" || arguments_[1] === "relogin") {
+          throw new ApplicationError(
+            "USAGE",
+            "Pi has no separate account; it uses the selected OpenAI login. Run: tokmax codex login",
+          );
+        }
         return managedPi(context, arguments_.slice(1));
+      case "list":
+        listAccounts(context);
+        return 0;
       case "hook":
         if (arguments_[1] !== "claude") {
           throw new ApplicationError("USAGE", "Usage: hook claude <action>");
@@ -673,7 +700,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
       default:
         throw new ApplicationError(
           "UNKNOWN_COMMAND",
-          `Unknown command ${command}. Run codex-auth --help.`,
+          `Unknown command ${command}. Run tokmax --help.`,
         );
     }
   } finally {

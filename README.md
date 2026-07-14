@@ -1,4 +1,4 @@
-# Codex Account Switcher
+# tokmax
 
 A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.
 
@@ -7,21 +7,20 @@ Keychain, displays every account's current usage windows, and switches managed r
 safe request boundary.
 
 ```text
-CODEX ACCOUNT SWITCHER
-local control plane · 9:42:18 AM · 1 claude · 2 pi
+tokmax · 9:42 AM · 1 claude · 2 pi
 
-OPENAI · Codex + Pi  AUTO ON · 95% threshold  auth generation 4
-  ● dexter@example.com
-     5h [███████████████░]  94%  7d [██████░░░░░░░░░░]  38%
-     ready                        resets 38m
+OpenAI · Codex + Pi                        auto-rotate on @95% · gen 4
+  ● dexter@example.com                         active
+      5 hour               ███████████████░   94% · resets 38m
+      7 day                ██████░░░░░░░░░░   38% · resets 4d 6h
   ○ zero@example.com
-     5h [██░░░░░░░░░░░░░░]  12%  7d [████░░░░░░░░░░░░]  24%
-     ready                        resets 3h 12m
+      5 hour               ██░░░░░░░░░░░░░░   12% · resets 3h 12m
+      7 day                ████░░░░░░░░░░░░   24% · resets 5d 1h
 
-ANTHROPIC · Claude Code  AUTO OFF  auth generation 1
-  ● dexter2@example.com
-     5h [████░░░░░░░░░░░░]  27%  7d [█░░░░░░░░░░░░░░░]   5%
-     ready                        resets 2h 5m
+Anthropic · Claude Code                    auto-rotate off · gen 1
+  ● dexter2@example.com                        active
+      5h session           ████░░░░░░░░░░░░   27% · resets 2h 5m
+      7 day · all models   █░░░░░░░░░░░░░░░    5% · resets 6d 18h
 ```
 
 ## What is actually managed
@@ -39,9 +38,9 @@ Pi-to-Anthropic runtime.
 The manager intentionally controls only processes launched through its wrappers:
 
 ```bash
-codex-auth codex
-codex-auth claude
-codex-auth pi --model openai-codex/gpt-5.4
+tokmax codex
+tokmax claude
+tokmax pi --model openai-codex/gpt-5.4
 ```
 
 Existing unmanaged processes stay outside the control plane. They are never killed or rewritten.
@@ -65,7 +64,7 @@ bun run check
 bun link
 ```
 
-Run `codex-auth doctor` to verify the local tools and manager boundary.
+Run `tokmax doctor` to verify the local tools and manager boundary.
 
 ## Register accounts
 
@@ -73,18 +72,18 @@ Each login runs in its own isolated provider home. It does not change the accoun
 running process.
 
 ```bash
-codex-auth account add codex
-codex-auth account add codex
+tokmax codex login
+tokmax codex login
 
-codex-auth account add claude --email dexter@example.com
-codex-auth account add claude
+tokmax claude login --email dexter@example.com
+tokmax claude login
 
 # Repair an expired/revoked login without changing its stable account ID.
-codex-auth daemon stop
-codex-auth account reauthenticate codex dexter@example.com
-codex-auth account reauthenticate claude dexter@example.com
+tokmax daemon stop
+tokmax codex relogin dexter@example.com
+tokmax claude relogin dexter@example.com
 
-codex-auth account list
+tokmax list
 ```
 
 Each account is named by the verified email returned after login. The optional Claude `--email`
@@ -100,12 +99,12 @@ SQLite contains identities, health, usage, and opaque secret references—never 
 ## Select an account and launch managed clients
 
 ```bash
-codex-auth switch codex dexter@example.com
-codex-auth switch claude dexter@example.com
+tokmax switch codex dexter@example.com
+tokmax switch claude dexter@example.com
 
-codex-auth codex
-codex-auth claude
-codex-auth pi --model openai-codex/gpt-5.4
+tokmax codex
+tokmax claude
+tokmax pi --model openai-codex/gpt-5.4
 ```
 
 Switching is transactional:
@@ -130,26 +129,26 @@ then updates the process-local provider credential and closes its cached Codex W
 Run the live dashboard:
 
 ```bash
-codex-auth
+tokmax
 ```
 
 Or get machine-readable state:
 
 ```bash
-codex-auth status --json
-codex-auth refresh
+tokmax status --json
+tokmax refresh
 ```
 
 Automatic rotation is disabled by default. Enabling it requires an explicit confirmation that your
 provider permits this use of the accounts:
 
 ```bash
-codex-auth auto codex on --threshold 95 --authorized
-codex-auth auto claude on --threshold 95 --authorized
-codex-auth auto both on --threshold 95 --authorized
+tokmax auto codex on --threshold 95 --authorized
+tokmax auto claude on --threshold 95 --authorized
+tokmax auto both on --threshold 95 --authorized
 
-codex-auth auto codex off
-codex-auth auto claude off
+tokmax auto codex off
+tokmax auto claude off
 ```
 
 The selector is pure and deterministic. It:
@@ -167,15 +166,15 @@ A failed or expired reading is `unknown`, never `0%`.
 The dashboard and managed wrappers start the local daemon when needed.
 
 ```bash
-codex-auth daemon start
-codex-auth daemon status
-codex-auth daemon stop
+tokmax daemon start
+tokmax daemon status
+tokmax daemon stop
 ```
 
 The daemon owns the switching leases, provider probes, and Codex app-server connection. Manager and
 managed-client Unix sockets are mode `0600`. The app-server's private loopback listener requires a
-random capability token held in a mode-`0600` file. State lives under `~/.codex-auth` by default; set
-`CODEX_AUTH_HOME` to isolate an installation.
+random capability token held in a mode-`0600` file. State lives under `~/.tokmax` by default; set
+`TOKMAX_HOME` to isolate an installation.
 
 ## Why this does not swap auth files
 
