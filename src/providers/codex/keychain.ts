@@ -6,6 +6,15 @@ const defaultService = "com.rubriclabs.tokmax";
 const base64Pattern = /^[A-Za-z0-9+/]+={0,2}$/;
 const identifierPattern = /^[\w.@:-]+$/;
 
+// `security -i` reads each interactive command into a fixed 4096-byte line
+// buffer (verified empirically: a 4030-character payload round-trips, 4050
+// fails), so large credentials are stored as multiple items of this many
+// base64 characters. 2048 is a multiple of 4, keeping `=` padding in the
+// final slice only.
+const chunkLength = 2_048;
+const maximumChunkCount = 64;
+const manifestPrefix = "tokmax-chunks:";
+
 export interface KeychainCommandResult {
   exitCode: number;
   stdout: string;
@@ -38,6 +47,13 @@ function defaultKeychainCommandRunner(): KeychainCommandRunner {
   };
 }
 
+// security echoes unrecognized input back in its diagnostics, which would put
+// credential material in an error message. Long base64 runs are secrets here.
+function redactSecrets(diagnostic: string): string {
+  const redacted = diagnostic.replace(/[A-Za-z0-9+/=]{32,}/g, "[redacted]").trim();
+  return redacted.length > 300 ? `${redacted.slice(0, 299)}…` : redacted;
+}
+
 function requireSafeIdentifier(kind: string, value: string): string {
   if (!identifierPattern.test(value)) {
     throw new ApplicationError(
@@ -53,68 +69,144 @@ export function createMacOsKeychainVault(
   runner: KeychainCommandRunner = defaultKeychainCommandRunner(),
 ): CredentialVault {
   requireSafeIdentifier("service", service);
+
+  async function readItem(itemName: string): Promise<string | null> {
+    const result = await runner.run([
+      "security",
+      "find-generic-password",
+      "-s",
+      service,
+      "-a",
+      itemName,
+      "-w",
+    ]);
+    if (result.exitCode === 44) {
+      return null;
+    }
+    if (result.exitCode !== 0) {
+      throw new ApplicationError(
+        "KEYCHAIN_READ_FAILED",
+        redactSecrets(result.stderr) || "Keychain read failed",
+      );
+    }
+    const stored = result.stdout.trim();
+    if (!base64Pattern.test(stored)) {
+      throw new ApplicationError(
+        "KEYCHAIN_ITEM_CORRUPT",
+        `Keychain item ${itemName} is not base64-encoded; refusing to guess its contents`,
+      );
+    }
+    return stored;
+  }
+
+  async function writeItem(itemName: string, encoded: string): Promise<void> {
+    // A bare trailing `-w` prompts on the controlling terminal and passing the
+    // secret as an argument would expose it in argv. Interactive command mode
+    // reads the whole command from stdin instead; the base64 payload keeps it
+    // inside `security`'s unquoted token grammar and under its line buffer.
+    const command = `add-generic-password -U -s ${service} -a ${itemName} -w ${encoded}\n`;
+    const result = await runner.run(["security", "-i"], command);
+    if (result.exitCode !== 0) {
+      throw new ApplicationError(
+        "KEYCHAIN_WRITE_FAILED",
+        redactSecrets(result.stderr) || "Keychain write failed",
+      );
+    }
+  }
+
+  async function deleteItem(itemName: string): Promise<boolean> {
+    const result = await runner.run([
+      "security",
+      "delete-generic-password",
+      "-s",
+      service,
+      "-a",
+      itemName,
+    ]);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 44) {
+      return false;
+    }
+    throw new ApplicationError(
+      "KEYCHAIN_DELETE_FAILED",
+      redactSecrets(result.stderr) || "Keychain delete failed",
+    );
+  }
+
+  async function deleteChunksFrom(reference: string, firstIndex: number): Promise<void> {
+    for (let index = firstIndex; index < maximumChunkCount; index += 1) {
+      if (!(await deleteItem(`${reference}:${index}`))) {
+        return;
+      }
+    }
+  }
+
   return {
     async read(reference) {
       requireSafeIdentifier("reference", reference);
-      const result = await runner.run([
-        "security",
-        "find-generic-password",
-        "-s",
-        service,
-        "-a",
-        reference,
-        "-w",
-      ]);
-      if (result.exitCode === 44) {
+      const stored = await readItem(reference);
+      if (stored === null) {
         return null;
       }
-      if (result.exitCode !== 0) {
-        throw new ApplicationError(
-          "KEYCHAIN_READ_FAILED",
-          result.stderr.trim() || "Keychain read failed",
-        );
+      const decoded = Buffer.from(stored, "base64").toString("utf8");
+      if (!decoded.startsWith(manifestPrefix)) {
+        return decoded;
       }
-      const stored = result.stdout.trim();
-      if (!base64Pattern.test(stored)) {
+      const chunkCount = Number(decoded.slice(manifestPrefix.length));
+      if (!Number.isInteger(chunkCount) || chunkCount < 1 || chunkCount > maximumChunkCount) {
         throw new ApplicationError(
           "KEYCHAIN_ITEM_CORRUPT",
-          `Keychain item ${reference} is not base64-encoded; refusing to guess its contents`,
+          `Keychain item ${reference} declares an invalid chunk count`,
         );
       }
-      return Buffer.from(stored, "base64").toString("utf8");
+      const chunks: string[] = [];
+      for (let index = 0; index < chunkCount; index += 1) {
+        const chunk = await readItem(`${reference}:${index}`);
+        if (chunk === null) {
+          throw new ApplicationError(
+            "KEYCHAIN_ITEM_CORRUPT",
+            `Keychain item ${reference} is missing chunk ${index} of ${chunkCount}`,
+          );
+        }
+        chunks.push(chunk);
+      }
+      return Buffer.from(chunks.join(""), "base64").toString("utf8");
     },
     async write(reference, value) {
       requireSafeIdentifier("reference", reference);
-      // `security add-generic-password -w` with no value prompts on the controlling
-      // terminal, and passing the secret as an argument would expose it in argv.
-      // Interactive command mode reads the whole command from stdin instead; the
-      // base64 payload keeps it inside `security`'s unquoted token grammar.
       const encoded = Buffer.from(value, "utf8").toString("base64");
-      const command = `add-generic-password -U -s ${service} -a ${reference} -w ${encoded}\n`;
-      const result = await runner.run(["security", "-i"], command);
-      if (result.exitCode !== 0) {
+      if (encoded.length <= chunkLength) {
+        await writeItem(reference, encoded);
+        await deleteChunksFrom(reference, 0);
+        return;
+      }
+      const chunkCount = Math.ceil(encoded.length / chunkLength);
+      if (chunkCount > maximumChunkCount) {
         throw new ApplicationError(
-          "KEYCHAIN_WRITE_FAILED",
-          result.stderr.trim() || "Keychain write failed",
+          "KEYCHAIN_VALUE_TOO_LARGE",
+          `Credential exceeds ${maximumChunkCount} keychain chunks`,
         );
       }
+      // Chunks first, manifest last: a reader never sees a manifest whose
+      // chunks have not all been written yet.
+      for (let index = 0; index < chunkCount; index += 1) {
+        await writeItem(
+          `${reference}:${index}`,
+          encoded.slice(index * chunkLength, (index + 1) * chunkLength),
+        );
+      }
+      await writeItem(
+        reference,
+        Buffer.from(`${manifestPrefix}${chunkCount}`, "utf8").toString("base64"),
+      );
+      await deleteChunksFrom(reference, chunkCount);
     },
     async remove(reference) {
       requireSafeIdentifier("reference", reference);
-      const result = await runner.run([
-        "security",
-        "delete-generic-password",
-        "-s",
-        service,
-        "-a",
-        reference,
-      ]);
-      if (result.exitCode !== 0 && result.exitCode !== 44) {
-        throw new ApplicationError(
-          "KEYCHAIN_DELETE_FAILED",
-          result.stderr.trim() || "Keychain delete failed",
-        );
-      }
+      await deleteItem(reference);
+      await deleteChunksFrom(reference, 0);
     },
   };
 }

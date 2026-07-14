@@ -137,6 +137,9 @@ export class AccountManager {
       try {
         await adapter.start();
       } catch (error) {
+        process.stderr.write(
+          `${adapter.provider} adapter failed to start: ${errorMessage(error)}\n`,
+        );
         await adapter.stop().catch(() => undefined);
         const activeAccountId = this.#store.findProviderState(adapter.provider).activeAccountId;
         for (const account of this.#store.listAccounts(adapter.provider)) {
@@ -453,6 +456,9 @@ export class AccountManager {
         continue;
       }
       await this.refreshAccount(account).catch((error) => {
+        process.stderr.write(
+          `probe failed for ${account.provider} ${account.label}: ${errorMessage(error)}\n`,
+        );
         this.#store.saveAccount({
           ...account,
           health: healthForError(error),

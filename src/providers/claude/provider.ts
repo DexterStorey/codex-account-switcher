@@ -6,6 +6,7 @@ import type { ApplicationPaths } from "../../paths.ts";
 import type { ProviderAdapter, ProviderProbeResult } from "../provider.ts";
 import {
   activateClaudeAccount,
+  activeProfileHoldsAccount,
   defaultClaudeCredentialReader,
   fetchClaudeProfile,
   projectClaudeCredential,
@@ -85,9 +86,24 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
 
   public async start(): Promise<void> {
     const active = this.#dependencies.activeAccount();
-    if (active?.provider === "anthropic") {
-      await this.activate(active);
+    if (active?.provider !== "anthropic") {
+      return;
     }
+    // The committed credential usually already lives in the active profile
+    // and its refresh token has rotated past the saved profile's copy, so a
+    // restart must verify rather than re-project.
+    if (
+      await activeProfileHoldsAccount({
+        account: active,
+        paths: this.#paths,
+        now: this.#dependencies.now(),
+        fetchImplementation: this.#dependencies.fetchImplementation,
+      })
+    ) {
+      this.#projectedAccountId = active.id;
+      return;
+    }
+    await this.activate(active);
   }
 
   public async stop(): Promise<void> {}

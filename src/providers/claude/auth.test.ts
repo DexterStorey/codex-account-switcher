@@ -2,8 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Account } from "../../domain.ts";
 import { applicationPaths } from "../../paths.ts";
 import {
+  activeProfileHoldsAccount,
   type ClaudeCommandRunner,
   canonicalClaudeProfilePath,
   claudeKeychainService,
@@ -129,5 +131,136 @@ describe("Claude auth", () => {
     expect(invokedCommand.join(" ")).not.toContain("refresh-secret");
     expect(invokedEnvironment.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("refresh-secret");
     expect(invokedEnvironment.CLAUDE_CONFIG_DIR).toBe("/managed/active");
+  });
+
+  test("a matching active credential is verified without re-projecting a rotated token", async () => {
+    const paths = applicationPaths({ TOKMAX_HOME: "/tmp/tokmax-verify-test" });
+    const account: Account = {
+      id: "00000000-0000-4000-8000-000000000001",
+      provider: "anthropic",
+      label: "person@example.com",
+      identity: "person@example.com",
+      externalAccountId: "account-1",
+      externalUserId: null,
+      secretReference: null,
+      profilePath: "/tmp/tokmax-verify-test/profiles/claude/saved",
+      health: "ready",
+      enabled: true,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+    };
+    const projections: string[] = [];
+    const runner: ClaudeCommandRunner = {
+      interactive: async () => 1,
+      captured: async (_command, environment) => {
+        projections.push(environment.CLAUDE_CONFIG_DIR ?? "");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const readProfiles: string[] = [];
+    const now = new Date("2026-07-14T12:00:00.000Z");
+    const verified = await activeProfileHoldsAccount({
+      account,
+      paths,
+      now,
+      runner,
+      credentialReader: {
+        read: async (profilePath) => {
+          readProfiles.push(profilePath);
+          return {
+            accessToken: "active-access",
+            refreshToken: "active-refresh",
+            expiresAt: now.getTime() + 3_600_000,
+          };
+        },
+      },
+      fetchImplementation: async () =>
+        new Response(JSON.stringify({ account: { uuid: "account-1" } }), { status: 200 }),
+    });
+    expect(verified).toBe(true);
+    expect(readProfiles).toEqual([paths.claudeActiveProfile]);
+    // A valid active credential must not trigger `claude auth login`; that
+    // replays a rotated refresh token and the OAuth endpoint rejects it.
+    expect(projections).toEqual([]);
+    const wrongIdentity = await activeProfileHoldsAccount({
+      account,
+      paths,
+      now,
+      runner,
+      credentialReader: {
+        read: async () => ({
+          accessToken: "active-access",
+          refreshToken: "active-refresh",
+          expiresAt: now.getTime() + 3_600_000,
+        }),
+      },
+      fetchImplementation: async () =>
+        new Response(JSON.stringify({ account: { uuid: "someone-else" } }), { status: 200 }),
+    });
+    expect(wrongIdentity).toBe(false);
+    const missingCredential = await activeProfileHoldsAccount({
+      account,
+      paths,
+      now,
+      runner,
+      credentialReader: {
+        read: async () => {
+          throw new Error("no credential");
+        },
+      },
+      fetchImplementation: async () => new Response("{}", { status: 200 }),
+    });
+    expect(missingCredential).toBe(false);
+  });
+
+  test("an expired active credential is refreshed in place, not re-projected from the saved profile", async () => {
+    const paths = applicationPaths({ TOKMAX_HOME: "/tmp/tokmax-refresh-test" });
+    const account: Account = {
+      id: "00000000-0000-4000-8000-000000000002",
+      provider: "anthropic",
+      label: "person@example.com",
+      identity: "person@example.com",
+      externalAccountId: "account-1",
+      externalUserId: null,
+      secretReference: null,
+      profilePath: "/tmp/tokmax-refresh-test/profiles/claude/saved",
+      health: "ready",
+      enabled: true,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+    };
+    const now = new Date("2026-07-14T12:00:00.000Z");
+    const projections: Array<{ profile: string | undefined; token: string | undefined }> = [];
+    let refreshed = false;
+    const runner: ClaudeCommandRunner = {
+      interactive: async () => 1,
+      captured: async (_command, environment) => {
+        projections.push({
+          profile: environment.CLAUDE_CONFIG_DIR,
+          token: environment.CLAUDE_CODE_OAUTH_REFRESH_TOKEN,
+        });
+        refreshed = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const verified = await activeProfileHoldsAccount({
+      account,
+      paths,
+      now,
+      runner,
+      credentialReader: {
+        read: async () => ({
+          accessToken: refreshed ? "fresh-access" : "stale-access",
+          refreshToken: refreshed ? "fresh-refresh" : "active-refresh",
+          expiresAt: refreshed ? now.getTime() + 3_600_000 : now.getTime() - 1_000,
+        }),
+      },
+      fetchImplementation: async () =>
+        new Response(JSON.stringify({ account: { uuid: "account-1" } }), { status: 200 }),
+    });
+    expect(verified).toBe(true);
+    // The refresh must run against the active profile with its own rotating
+    // token — never against the saved profile's stale copy.
+    expect(projections).toEqual([{ profile: paths.claudeActiveProfile, token: "active-refresh" }]);
   });
 });

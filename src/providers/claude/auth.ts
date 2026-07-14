@@ -331,6 +331,46 @@ export async function projectClaudeCredential(input: {
   }
 }
 
+// Claude refresh tokens rotate on every use, so once a credential has been
+// projected into the active profile, the saved profile's copy is consumed.
+// Re-projecting it replays a dead token and the OAuth endpoint answers 400.
+// Activation must therefore be reserved for a missing, expired-and-
+// unrefreshable, or wrong-identity active credential.
+export async function activeProfileHoldsAccount(input: {
+  account: Account;
+  paths: ApplicationPaths;
+  now: Date;
+  fetchImplementation?: FetchImplementation;
+  runner?: ClaudeCommandRunner;
+  credentialReader?: ClaudeProfileCredentialReader;
+}): Promise<boolean> {
+  if (input.account.provider !== "anthropic") {
+    return false;
+  }
+  const runner = input.runner ?? defaultClaudeCommandRunner();
+  const reader = input.credentialReader ?? defaultClaudeCredentialReader(runner);
+  try {
+    let credential = await reader.read(input.paths.claudeActiveProfile);
+    if (credential.expiresAt <= input.now.getTime() + 300_000) {
+      credential = await refreshClaudeProfile({
+        profilePath: input.paths.claudeActiveProfile,
+        runner,
+        credentialReader: reader,
+      });
+    }
+    const profile = await fetchClaudeProfile(
+      credential.accessToken,
+      input.fetchImplementation ?? fetch,
+    );
+    return (
+      input.account.externalAccountId === null ||
+      input.account.externalAccountId === profile.accountId
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function activateClaudeAccount(input: {
   account: Account;
   paths: ApplicationPaths;

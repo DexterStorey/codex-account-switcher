@@ -152,29 +152,69 @@ async function startDaemon(context: ApplicationContext): Promise<void> {
     return;
   }
   await mkdir(context.paths.runtime, { recursive: true, mode: 0o700 });
-  const logDescriptor = openSync(join(context.paths.runtime, "daemon.log"), "a", 0o600);
   const entrypoint = process.argv[1];
   if (entrypoint === undefined) {
-    closeSync(logDescriptor);
     throw new ApplicationError("ENTRYPOINT_MISSING", "Cannot locate the CLI entrypoint");
   }
-  const child = spawn(process.execPath, [entrypoint, "daemon", "run"], {
-    detached: true,
-    env: process.env,
-    stdio: ["ignore", logDescriptor, logDescriptor],
+  const logDescriptor = openSync(join(context.paths.runtime, "daemon.log"), "a", 0o600);
+  try {
+    // A stopping daemon releases its startup lock only after a full drain, so
+    // a freshly spawned manager can lose the lock race and exit. Spawn again
+    // instead of failing the whole start.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const child = spawn(process.execPath, [entrypoint, "daemon", "run"], {
+        detached: true,
+        env: process.env,
+        stdio: ["ignore", logDescriptor, logDescriptor],
+      });
+      child.unref();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        if (await managerAvailable(context.paths.managerSocket)) {
+          return;
+        }
+        if (child.exitCode !== null) {
+          break;
+        }
+        await Bun.sleep(50);
+      }
+      if (await managerAvailable(context.paths.managerSocket)) {
+        return;
+      }
+      await Bun.sleep(500);
+    }
+    throw new ApplicationError(
+      "DAEMON_START_FAILED",
+      `Manager did not start; inspect ${join(context.paths.runtime, "daemon.log")}`,
+    );
+  } finally {
+    closeSync(logDescriptor);
+  }
+}
+
+async function stopDaemon(context: ApplicationContext): Promise<void> {
+  await managerRequest({
+    socketPath: context.paths.managerSocket,
+    method: "manager/stop",
+    schema: EmptyResultSchema,
+    timeoutMilliseconds: 1_000,
   });
-  child.unref();
-  closeSync(logDescriptor);
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (await managerAvailable(context.paths.managerSocket)) {
+  // Wait for the drain to finish so `daemon stop && daemon start` and the
+  // stopped-manager requirement for relogin are race-free.
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const running = await managerAvailable(context.paths.managerSocket);
+    const lockHeld = await stat(context.paths.managerLock).then(
+      () => true,
+      () => false,
+    );
+    if (!running && !lockHeld) {
+      process.stdout.write("Manager daemon stopped.\n");
       return;
     }
-    await Bun.sleep(50);
+    await Bun.sleep(200);
   }
-  throw new ApplicationError(
-    "DAEMON_START_FAILED",
-    `Manager did not start; inspect ${join(context.paths.runtime, "daemon.log")}`,
-  );
+  process.stdout.write("Manager daemon is still draining; check tokmax daemon status.\n");
 }
 
 async function ensureDaemon(context: ApplicationContext): Promise<void> {
@@ -678,13 +718,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
             process.stdout.write("Manager daemon is running.\n");
             return 0;
           case "stop":
-            await managerRequest({
-              socketPath: context.paths.managerSocket,
-              method: "manager/stop",
-              schema: EmptyResultSchema,
-              timeoutMilliseconds: 1_000,
-            });
-            process.stdout.write("Manager daemon is stopping.\n");
+            await stopDaemon(context);
             return 0;
           case "status":
             process.stdout.write(
