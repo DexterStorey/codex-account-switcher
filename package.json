@@ -1,24 +1,33 @@
 {
-  "name": "codex-auth",
-  "version": "0.1.1",
-  "description": "A command-line tool that lets you manage and switch between multiple Codex accounts instantly, no more constant logins and logouts.",
+  "name": "codex-account-switcher",
+  "version": "0.2.0",
+  "description": "A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.",
   "license": "MIT",
+  "type": "module",
   "bin": {
     "codex-auth": "dist/index.js"
   },
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "prepublishOnly": "npm run build",
-    "test": "npm run build && node --test dist/**/*.test.js"
+    "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist && bun build ./src/extensions/pi.ts --target bun --format esm --outdir dist/extensions && chmod 755 dist/index.js && chmod 644 dist/extensions/pi.js",
+    "check": "bun run typecheck && bun run lint && bun test",
+    "clean": "rm -rf dist",
+    "dev": "bun run src/index.ts",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "prepublishOnly": "bun run check && bun run build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=18"
+    "bun": ">=1.2.0"
   },
   "files": [
     "dist",
     "README.md",
+    "DESIGN.md",
+    "SECURITY.md",
+    "COMPATIBILITY.md",
     "LICENSE"
   ],
   "keywords": [
@@ -27,38 +36,28 @@
     "auth",
     "accounts",
     "switch",
-    "tokens"
+    "tokens",
+    "rate-limits",
+    "claude-code",
+    "pi"
   ],
   "preferGlobal": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Sls0n/codex-account-switcher.git"
+    "url": "git+https://github.com/DexterStorey/codex-account-switcher.git"
   },
   "bugs": {
-    "url": "https://github.com/Sls0n/codex-account-switcher/issues"
+    "url": "https://github.com/DexterStorey/codex-account-switcher/issues"
   },
-  "homepage": "https://github.com/Sls0n/codex-account-switcher#readme",
-  "author": "Sls0n",
+  "homepage": "https://github.com/DexterStorey/codex-account-switcher#readme",
+  "author": "Dexter Storey",
   "dependencies": {
-    "@oclif/core": "^3.0.0",
-    "prompts": "^2.4.2",
-    "tslib": "^2.8.1"
+    "@earendil-works/pi-ai": "0.80.6",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/prompts": "^2.4.9",
-    "typescript": "^5.6.3"
-  },
-  "oclif": {
-    "bin": "codex-auth",
-    "commands": "./dist/commands",
-    "topicSeparator": " ",
-    "topics": {
-      "claude": {
-        "description": "Claude Code account management"
-      },
-      "pi": {
-        "description": "pi account management"
-      }
-    }
+    "@biomejs/biome": "^2.0.0",
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.8.0"
   }
 }

@@ -1,142 +1,246 @@
-# codex-auth
+# Codex Account Switcher
 
-Keep intelligence flowing across multiple rate-limited AI subscription accounts.
+A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.
 
-Save several accounts per CLI, switch between them instantly, see every account's
-5-hour-window usage in one place, and let the auto-rotator move you off an account
-before it hits its limit.
+It registers subscription accounts without touching live sessions, keeps credentials in the macOS
+Keychain, displays every account's current usage windows, and switches managed runtimes only at a
+safe request boundary.
 
-Supports **Codex**, **Claude Code**, and **pi** — each has different credential
-storage, login mechanics, and session behavior. This tool normalizes all of it.
+```text
+CODEX ACCOUNT SWITCHER
+local control plane · 9:42:18 AM · 1 claude · 2 pi
+
+OPENAI · Codex + Pi  AUTO ON · 95% threshold  auth generation 4
+  ● dexter@example.com
+     5h [███████████████░]  94%  7d [██████░░░░░░░░░░]  38%
+     ready                        resets 38m
+  ○ zero@example.com
+     5h [██░░░░░░░░░░░░░░]  12%  7d [████░░░░░░░░░░░░]  24%
+     ready                        resets 3h 12m
+
+ANTHROPIC · Claude Code  AUTO OFF  auth generation 1
+  ● dexter2@example.com
+     5h [████░░░░░░░░░░░░]  27%  7d [█░░░░░░░░░░░░░░░]   5%
+     ready                        resets 2h 5m
+```
+
+## What is actually managed
+
+There are two independent axes:
+
+- **Provider accounts:** OpenAI and Anthropic.
+- **Runtime clients:** Codex CLI, Claude Code, and Pi.
+
+Pi is a client, not a third subscription provider. Pi's `openai-codex` traffic consumes the selected
+OpenAI account's Codex allowance. Pi's Anthropic OAuth usage is currently treated as extra usage by
+Pi, not as Claude Max plan usage, so this project does not pretend that rotating Max accounts extends
+Pi-to-Anthropic runtime.
+
+The manager intentionally controls only processes launched through its wrappers:
+
+```bash
+codex-auth codex
+codex-auth claude
+codex-auth pi --model openai-codex/gpt-5.4
+```
+
+Existing unmanaged processes stay outside the control plane. They are never killed or rewritten.
+
+## Requirements
+
+- macOS (the initial vault implementation uses Keychain)
+- [Bun](https://bun.sh/) 1.2 or newer
+- Codex CLI, Claude Code, and/or Pi on `PATH`
+
+The compatibility suite was developed against Codex `0.144.1`, Claude Code `2.1.206`, and Pi `0.80.6`.
+See [COMPATIBILITY.md](./COMPATIBILITY.md) before upgrading those clients.
 
 ## Install
 
-```sh
-npm install -g codex-auth      # or: bun add -g codex-auth
+```bash
+git clone https://github.com/DexterStorey/codex-account-switcher.git
+cd codex-account-switcher
+bun install
+bun run check
+bun link
 ```
 
-Requires Node 18+. macOS and Linux (Claude Code support is macOS-only today — its
-credentials live in the login keychain).
+Run `codex-auth doctor` to verify the local tools and manager boundary.
 
-## Usage
+## Register accounts
 
-```sh
-# see every account, every provider, with live usage
-codex-auth status
+Each login runs in its own isolated provider home. It does not change the account used by a currently
+running process.
 
-# rotate now if the active account is past 95% of its 5h window
-codex-auth rotate
+```bash
+codex-auth account add codex
+codex-auth account add codex
 
-# keep rotating automatically, forever
-codex-auth watch
+codex-auth account add claude --email dexter@example.com
+codex-auth account add claude
+
+# Repair an expired/revoked login without changing its stable account ID.
+codex-auth daemon stop
+codex-auth account reauthenticate codex dexter@example.com
+codex-auth account reauthenticate claude dexter@example.com
+
+codex-auth account list
 ```
 
-Per-provider account management:
+Each account is named by the verified email returned after login. The optional Claude `--email`
+value only pre-fills the provider login; it never overrides the verified identity.
+Reauthentication intentionally requires a stopped manager and no live managed sessions. This keeps
+the old credential durable until the isolated replacement has been verified and committed.
 
-```sh
-codex-auth codex  add|save|use|list|current [name]
-codex-auth claude add|save|use|list|current [name]
-codex-auth pi          save|use|list|current [name]
+Codex credentials are imported into this application's Keychain service and the temporary login home
+is deleted. Claude credentials remain in Claude Code's own per-`CLAUDE_CONFIG_DIR` Keychain profiles
+(or Claude's mode-`0600` fallback when Keychain is unavailable).
+SQLite contains identities, health, usage, and opaque secret references—never tokens.
+
+## Select an account and launch managed clients
+
+```bash
+codex-auth switch codex dexter@example.com
+codex-auth switch claude dexter@example.com
+
+codex-auth codex
+codex-auth claude
+codex-auth pi --model openai-codex/gpt-5.4
 ```
 
-Codex is also the default provider, so the bare commands still work:
-`codex-auth save <name>`, `codex-auth use <name>`, `codex-auth switch <name>`, etc.
+Switching is transactional:
 
-### Example
+1. Refresh and validate the target credential.
+2. Wait for managed sessions to reach an idle boundary.
+3. Activate the target in the provider runtime.
+4. Verify identity and rate limits.
+5. Commit the new generation to SQLite.
+6. Roll back to the prior account if activation or verification fails.
 
+Codex threads stay loaded in a dedicated app-server. The managed provider forces HTTP Responses
+transport so the next turn reads the new auth generation; Codex's default WebSocket transport binds
+auth at the handshake and cannot safely hot-switch. A local dispatch gate queues newly submitted Codex
+turns, tracks accepted dispatch RPCs, and requires stable idle samples before activation. Claude Code
+sessions use one managed active `CLAUDE_CONFIG_DIR`; wrapper-owned `UserPromptSubmit`, `Stop`, and
+session hooks form the cooperative request boundary. Pi marks a turn working before credential lookup,
+then updates the process-local provider credential and closes its cached Codex WebSocket before dispatch.
+
+## Dashboard and automation
+
+Run the live dashboard:
+
+```bash
+codex-auth
 ```
-$ codex-auth status
 
-Codex
- * work             dexter@example.com      [pro]  5h 96% resets 11:50 p.m.  weekly 11% resets 06:50 p.m.
-   personal         me@example.com          [pro]  5h 12% resets 01:20 a.m.  weekly 3% resets 09:17 p.m.
+Or get machine-readable state:
 
-Claude Code
- * primary          dexter@example.com             5h 26% resets 03:00 a.m.  weekly 5% resets 09:00 a.m.
-
-$ codex-auth rotate
-[codex] Stopping codex pid 55823...
-[codex] Switched Codex auth to "personal".
-[codex] Resumed 019f497e-9dd7-7a81-a484-d724c7e36658 in tmux pane %7.
-[codex] rotated work (96%) → personal (12%)
+```bash
+codex-auth status --json
+codex-auth refresh
 ```
 
-## Commands
+Automatic rotation is disabled by default. Enabling it requires an explicit confirmation that your
+provider permits this use of the accounts:
 
-| Command | What it does |
-|---|---|
-| `status [--json]` | Live 5h + weekly usage for every saved account, across providers. Marks the active one. |
-| `rotate [--provider p] [--threshold 95] [--dry-run]` | If the active account is at/above the threshold, switch to the least-used saved account. |
-| `watch [--interval 120] [--threshold 95] [--providers ...]` | Run `rotate` on a loop, and repair credentials clobbered by a running session. |
-| `<provider> add <name>` | Log into a **new** account without logging out of the current one. |
-| `<provider> save <name>` | Snapshot the currently-live credentials under a name. |
-| `<provider> use [name]` | Make a saved account live (interactive picker if no name). |
-| `<provider> list` / `current` | List saved accounts / show the active one. |
-| `switch <name>` (codex) | `use`, plus kill and `codex resume` your running codex sessions on the new account. |
+```bash
+codex-auth auto codex on --threshold 95 --authorized
+codex-auth auto claude on --threshold 95 --authorized
+codex-auth auto both on --threshold 95 --authorized
 
-## How each provider behaves
+codex-auth auto codex off
+codex-auth auto claude off
+```
 
-The three CLIs differ in ways that matter, and the tool handles each correctly.
+The selector is pure and deterministic. It:
 
-**Codex** stores credentials in `~/.codex/auth.json`. A new account can be added
-with a fully isolated login (`CODEX_HOME` pointed at a temp dir), so your running
-session is never disturbed. Running sessions cache their tokens in memory and will
-**not** pick up a swapped account — `rotate`/`switch` therefore kill each
-user-owned session and immediately `codex resume` it, which restores the full
-conversation. Sessions in tmux panes resume automatically; sessions in plain
-terminals print the exact `codex resume <id>` to paste.
+- triggers when the active account reaches the threshold in **any** hard window;
+- refuses stale, missing, rate-limited, disabled, or unhealthy candidates;
+- ranks candidates by their worst hard-window pressure, lowest first;
+- applies hysteresis and minimum dwell time to prevent oscillation; and
+- uses account ID as the stable final tie-breaker.
 
-**Claude Code** stores credentials in the macOS login keychain (one item, shared
-across config dirs — so an isolated login is impossible; `add` snapshots, logs in,
-then restores). Running sessions hold their token in memory and keep working
-across a swap, so **no restart is needed**. Note the keychain item also holds MCP
-server tokens; those stay put and never move between accounts.
+A failed or expired reading is `unknown`, never `0%`.
 
-**pi** keeps its own OAuth store at `~/.pi/agent/auth.json`. Its job dispatcher has
-no retry or resume: killing a running codex child marks that job **failed** and
-loses the work. So rotation never touches pi's running jobs — swapping auth means
-newly dispatched work uses the new account, and in-flight jobs finish on the old one.
+## Daemon commands
 
-## Safety
+The dashboard and managed wrappers start the local daemon when needed.
 
-Both Codex and Claude Code rewrite their credentials in place when they refresh
-tokens, and both rotate refresh tokens (a refresh token is single-use — reusing an
-old copy invalidates the account). That creates two hazards this tool defends
-against:
+```bash
+codex-auth daemon start
+codex-auth daemon status
+codex-auth daemon stop
+```
 
-- **Sync-back before every switch.** The outgoing account's freshest tokens are
-  copied into its snapshot first, so a rotated refresh token is never stranded.
-  Snapshots are never symlinked into place, only copied, and every swap is verified
-  by re-reading it afterwards.
-- **Clobber repair.** A session that is still alive on the old account can refresh
-  and overwrite the credentials you just swapped in. `watch` detects this (the live
-  credentials no longer match the active account), attributes the stray tokens back
-  to their real owner, and re-asserts the account you chose.
+The daemon owns the switching leases, provider probes, and Codex app-server connection. Manager and
+managed-client Unix sockets are mode `0600`. The app-server's private loopback listener requires a
+random capability token held in a mode-`0600` file. State lives under `~/.codex-auth` by default; set
+`CODEX_AUTH_HOME` to isolate an installation.
 
-Accounts are identified by account **and** user id — two seats in one ChatGPT
-workspace share an account id but have separate rate limits, and are never treated
-as the same account.
+## Why this does not swap auth files
 
-Usage is read from each provider's own endpoint (`wham/usage` for Codex,
-`/api/oauth/usage` for Claude), which costs no model tokens. Codex's endpoint
-intermittently returns a stale, unrelated rate-limit bucket, so each reading is a
-best-of-three consensus — a single bad sample can't rotate you onto an exhausted
-account.
+Codex caches credentials in process, rotates refresh tokens, and can keep an authenticated WebSocket
+across turns. Replacing `~/.codex/auth.json` underneath running processes can strand refresh tokens or
+appear to switch while requests continue on the old account. OpenAI documents that Codex caches login
+details in `auth.json` or the OS credential store and refreshes ChatGPT tokens during use.
+[Authentication documentation](https://learn.chatgpt.com/docs/auth#login-caching)
 
-Credentials are stored under `~/.codex-auth/<provider>/<name>.json`, mode 0600,
-written atomically. Existing `~/.codex/accounts/*.json` snapshots are migrated
-automatically on first run.
+The managed Codex runtime instead uses:
+
+- a dedicated app-server on an authenticated IPv4-loopback endpoint;
+- a mode-`0600` Unix WebSocket gate for managed Codex TUIs;
+- a manager-owned dispatch gate that pauses new turns during a switch;
+- external `chatgptAuthTokens` login;
+- a custom provider with `requires_openai_auth = true`; and
+- `supports_websockets = false`, making the next idle turn the auth boundary.
+
+OpenAI documents custom providers and `requires_openai_auth` in the
+[Codex authentication guide](https://learn.chatgpt.com/docs/auth#alternative-model-providers).
+The app-server account methods are experimental, so they remain isolated behind a compatibility adapter.
+
+## Rate-limit sources
+
+- **Codex:** five-hour, weekly, and additional metered windows from the same backend model used by the
+  Codex client. Official Codex pricing confirms a shared five-hour window and that additional weekly
+  limits may apply. [Codex pricing](https://learn.chatgpt.com/docs/pricing#usage-limits)
+- **Claude Code:** five-hour, seven-day, and available model/surface windows from the authenticated
+  usage response.
+- **Pi:** no separate quota. OpenAI usage is attributed to the selected OpenAI account; Anthropic OAuth
+  spend is not presented as Claude Max utilization.
+
+The direct Codex and Claude usage endpoints are compatibility surfaces, not public APIs. Probes are
+strictly parsed, conservatively cached, and fail closed. They may require adapter updates when a provider
+changes its client.
+
+## Provider authorization
+
+This is a local orchestration tool, not a way to obtain additional entitlement. Use only accounts you
+own or administer and only where the relevant agreement permits account automation.
+
+Anthropic currently says Claude.ai OAuth is intended for Anthropic applications and restricts third
+parties from routing subscription credentials without approval.
+[Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance) ·
+[Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
+
+For that reason, the project ships monitoring and manual switching normally, but requires
+`--authorized` before automatic rotation can be enabled. That flag records your confirmation; it is not
+legal advice or provider approval.
 
 ## Development
 
-```sh
-npm install
-npm run build
-npm test          # rotation policy tests (fake providers, no network)
+```bash
+bun run typecheck
+bun run lint
+bun test
+bun run build
 ```
 
-See [DESIGN.md](./DESIGN.md) for the layered architecture (store → auth + limits →
-sessions → rotator) and the research behind each provider's mechanics.
+The codebase is TypeScript + Zod 4, Bun SQLite, and Biome. There is no CLI framework and no implicit
+global state: schemas own boundaries, SQLite owns durable transitions, provider adapters own unstable
+integration details, and the selection engine is a pure function.
+
+See [DESIGN.md](./DESIGN.md), [SECURITY.md](./SECURITY.md), and
+[COMPATIBILITY.md](./COMPATIBILITY.md) for the detailed contracts.
 
 ## License
 

@@ -1,6 +1,12 @@
-#!/usr/bin/env node
-import { run, flush, Errors } from "@oclif/core";
+#!/usr/bin/env bun
 
-void run()
-  .then(() => flush())
-  .catch(Errors.handle);
+import { runCli } from "./cli.ts";
+import { errorMessage } from "./errors.ts";
+
+try {
+  const exitCode = await runCli(process.argv.slice(2));
+  process.exitCode = exitCode;
+} catch (error) {
+  process.stderr.write(`codex-auth: ${errorMessage(error)}\n`);
+  process.exitCode = 1;
+}

@@ -1,0 +1,478 @@
+import { Database } from "bun:sqlite";
+import { chmodSync } from "node:fs";
+import {
+  type Account,
+  AccountSchema,
+  type AutomationPolicy,
+  AutomationPolicySchema,
+  type DashboardSnapshot,
+  DashboardSnapshotSchema,
+  type ProviderId,
+  ProviderIdSchema,
+  type ProviderState,
+  ProviderStateSchema,
+  type RuntimeSession,
+  RuntimeSessionSchema,
+  type SwitchRecord,
+  SwitchRecordSchema,
+  type UsageSnapshot,
+  UsageSnapshotSchema,
+} from "./domain.ts";
+import { ApplicationError } from "./errors.ts";
+
+type PersistedSchema<Type> = { parse(value: unknown): Type };
+
+export interface StateStore {
+  close(): void;
+  listAccounts(provider?: ProviderId): Account[];
+  findAccount(accountId: string): Account | null;
+  saveAccount(account: Account): void;
+  removeAccount(accountId: string): void;
+  listUsage(): UsageSnapshot[];
+  findUsage(accountId: string): UsageSnapshot | null;
+  saveUsage(snapshot: UsageSnapshot): void;
+  listProviderStates(): ProviderState[];
+  findProviderState(provider: ProviderId): ProviderState;
+  saveProviderState(state: ProviderState): void;
+  saveAutomationPolicy(policy: AutomationPolicy): ProviderState;
+  listSwitchRecords(limit?: number): SwitchRecord[];
+  saveSwitchRecord(record: SwitchRecord): void;
+  commitSwitch(record: SwitchRecord, state: ProviderState): void;
+  listRuntimeSessions(): RuntimeSession[];
+  saveRuntimeSession(session: RuntimeSession): void;
+  removeRuntimeSession(sessionId: string): void;
+  dashboard(): DashboardSnapshot;
+}
+
+interface JsonRow {
+  payload: string;
+}
+
+interface TableColumnRow {
+  name: string;
+}
+
+interface AccountMigrationRow extends JsonRow {
+  id: string;
+}
+
+function parsePayload<Type>(row: JsonRow | null, schema: PersistedSchema<Type>): Type | null {
+  if (row === null) {
+    return null;
+  }
+
+  try {
+    return schema.parse(JSON.parse(row.payload));
+  } catch (error) {
+    throw new ApplicationError("CORRUPT_STATE", "Stored state failed schema validation", {
+      cause: error,
+    });
+  }
+}
+
+function parseRequiredPayload<Type>(row: JsonRow, schema: PersistedSchema<Type>): Type {
+  const parsed = parsePayload(row, schema);
+  if (parsed === null) {
+    throw new ApplicationError("CORRUPT_STATE", "Stored row unexpectedly has no payload");
+  }
+  return parsed;
+}
+
+function serialize(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function initialProviderState(provider: ProviderId): ProviderState {
+  return ProviderStateSchema.parse({
+    provider,
+    activeAccountId: null,
+    generation: 0,
+    switchedAt: null,
+    policy: {
+      provider,
+      enabled: false,
+      thresholdPercent: 95,
+      hysteresisPercent: 5,
+      minimumDwellMilliseconds: 300_000,
+      maximumSnapshotAgeMilliseconds: 120_000,
+      authorization: "notConfirmed",
+    },
+  });
+}
+
+function migrate(database: Database): void {
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("PRAGMA foreign_keys = ON");
+  database.exec("PRAGMA busy_timeout = 5000");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      label TEXT NOT NULL,
+      external_account_id TEXT,
+      external_user_id TEXT,
+      payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS accounts_provider ON accounts(provider);
+
+    CREATE TABLE IF NOT EXISTS usage_snapshots (
+      account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      observed_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_states (
+      provider TEXT PRIMARY KEY,
+      payload TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS switch_records (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS switch_records_provider_created
+      ON switch_records(provider, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS runtime_sessions (
+      id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+  `);
+
+  const accountColumns = new Set(
+    database
+      .query<TableColumnRow, []>("PRAGMA table_info(accounts)")
+      .all()
+      .map((column) => column.name),
+  );
+  const requiresLabelMigration = !accountColumns.has("label");
+  const requiresExternalAccountIdMigration = !accountColumns.has("external_account_id");
+  const requiresExternalUserIdMigration = !accountColumns.has("external_user_id");
+  if (requiresLabelMigration) {
+    database.exec("ALTER TABLE accounts ADD COLUMN label TEXT");
+  }
+  if (requiresExternalAccountIdMigration) {
+    database.exec("ALTER TABLE accounts ADD COLUMN external_account_id TEXT");
+  }
+  if (requiresExternalUserIdMigration) {
+    database.exec("ALTER TABLE accounts ADD COLUMN external_user_id TEXT");
+  }
+  if (
+    requiresLabelMigration ||
+    requiresExternalAccountIdMigration ||
+    requiresExternalUserIdMigration
+  ) {
+    const migrationRows = database
+      .query<AccountMigrationRow, []>("SELECT id, payload FROM accounts")
+      .all();
+    const updateMigratedAccount = database.query(
+      "UPDATE accounts SET label = ?, external_account_id = ?, external_user_id = ? WHERE id = ?",
+    );
+    for (const row of migrationRows) {
+      const account = parseRequiredPayload(row, AccountSchema);
+      updateMigratedAccount.run(
+        account.label,
+        account.externalAccountId,
+        account.externalUserId,
+        row.id,
+      );
+    }
+  }
+  try {
+    database.exec(`
+      DROP INDEX IF EXISTS accounts_provider_external;
+      CREATE UNIQUE INDEX IF NOT EXISTS accounts_provider_label
+        ON accounts(provider, label);
+      CREATE UNIQUE INDEX IF NOT EXISTS accounts_openai_external_user
+        ON accounts(external_account_id, external_user_id)
+        WHERE provider = 'openai'
+          AND external_account_id IS NOT NULL
+          AND external_user_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS accounts_anthropic_external
+        ON accounts(external_account_id)
+        WHERE provider = 'anthropic' AND external_account_id IS NOT NULL;
+    `);
+  } catch (error) {
+    throw new ApplicationError(
+      "DUPLICATE_ACCOUNT",
+      "Stored accounts contain duplicate provider labels or identities",
+      { cause: error },
+    );
+  }
+
+  const insertState = database.query(
+    "INSERT OR IGNORE INTO provider_states(provider, payload) VALUES (?, ?)",
+  );
+  for (const provider of ProviderIdSchema.options) {
+    insertState.run(provider, serialize(initialProviderState(provider)));
+  }
+}
+
+export function createStateStore(databasePath: string): StateStore {
+  const database = new Database(databasePath, { create: true, strict: true });
+  migrate(database);
+  for (const path of [databasePath, `${databasePath}-shm`, `${databasePath}-wal`]) {
+    try {
+      chmodSync(path, 0o600);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && Reflect.get(error, "code") === "ENOENT")) {
+        throw error;
+      }
+    }
+  }
+
+  function listAccounts(provider?: ProviderId): Account[] {
+    const rows = provider
+      ? database
+          .query<JsonRow, [ProviderId]>(
+            "SELECT payload FROM accounts WHERE provider = ? ORDER BY label, id",
+          )
+          .all(provider)
+      : database
+          .query<JsonRow, []>("SELECT payload FROM accounts ORDER BY provider, label, id")
+          .all();
+    return rows.map((row) => parseRequiredPayload(row, AccountSchema));
+  }
+
+  function findAccount(accountId: string): Account | null {
+    const row = database
+      .query<JsonRow, [string]>("SELECT payload FROM accounts WHERE id = ?")
+      .get(accountId);
+    return parsePayload(row, AccountSchema);
+  }
+
+  function saveAccount(account: Account): void {
+    const parsed = AccountSchema.parse(account);
+    const duplicate = listAccounts(parsed.provider).find(
+      (candidate) =>
+        candidate.id !== parsed.id &&
+        (candidate.label === parsed.label ||
+          (parsed.provider === "openai" &&
+            candidate.provider === "openai" &&
+            parsed.externalAccountId !== null &&
+            parsed.externalUserId !== null &&
+            candidate.externalAccountId === parsed.externalAccountId &&
+            candidate.externalUserId === parsed.externalUserId) ||
+          (parsed.provider === "anthropic" &&
+            candidate.provider === "anthropic" &&
+            parsed.externalAccountId !== null &&
+            candidate.externalAccountId === parsed.externalAccountId)),
+    );
+    if (duplicate !== undefined) {
+      throw new ApplicationError(
+        "DUPLICATE_ACCOUNT",
+        `Account conflicts with registered profile ${duplicate.label}`,
+      );
+    }
+    try {
+      database
+        .query(
+          "INSERT INTO accounts(id, provider, label, external_account_id, external_user_id, payload) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, label = excluded.label, external_account_id = excluded.external_account_id, external_user_id = excluded.external_user_id, payload = excluded.payload",
+        )
+        .run(
+          parsed.id,
+          parsed.provider,
+          parsed.label,
+          parsed.externalAccountId,
+          parsed.externalUserId,
+          serialize(parsed),
+        );
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        throw new ApplicationError(
+          "DUPLICATE_ACCOUNT",
+          "Account label or identity is already registered",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  function removeAccount(accountId: string): void {
+    const transaction = database.transaction(() => {
+      for (const provider of ProviderIdSchema.options) {
+        const state = findProviderState(provider);
+        if (state.activeAccountId === accountId) {
+          saveProviderState({ ...state, activeAccountId: null });
+        }
+      }
+      database.query("DELETE FROM accounts WHERE id = ?").run(accountId);
+    });
+    transaction.immediate();
+  }
+
+  function listUsage(): UsageSnapshot[] {
+    return database
+      .query<JsonRow, []>("SELECT payload FROM usage_snapshots ORDER BY account_id")
+      .all()
+      .map((row) => parseRequiredPayload(row, UsageSnapshotSchema));
+  }
+
+  function findUsage(accountId: string): UsageSnapshot | null {
+    const row = database
+      .query<JsonRow, [string]>("SELECT payload FROM usage_snapshots WHERE account_id = ?")
+      .get(accountId);
+    return parsePayload(row, UsageSnapshotSchema);
+  }
+
+  function saveUsage(snapshot: UsageSnapshot): void {
+    const parsed = UsageSnapshotSchema.parse(snapshot);
+    const account = findAccount(parsed.accountId);
+    if (account === null) {
+      throw new ApplicationError("ACCOUNT_NOT_FOUND", `Unknown account ${parsed.accountId}`);
+    }
+    if (account.provider !== parsed.provider) {
+      throw new ApplicationError(
+        "PROVIDER_MISMATCH",
+        `Usage provider ${parsed.provider} does not match account provider ${account.provider}`,
+      );
+    }
+    database
+      .query(
+        "INSERT INTO usage_snapshots(account_id, observed_at, payload) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at, payload = excluded.payload",
+      )
+      .run(parsed.accountId, parsed.observedAt, serialize(parsed));
+  }
+
+  function listProviderStates(): ProviderState[] {
+    return database
+      .query<JsonRow, []>("SELECT payload FROM provider_states ORDER BY provider")
+      .all()
+      .map((row) => parseRequiredPayload(row, ProviderStateSchema));
+  }
+
+  function findProviderState(provider: ProviderId): ProviderState {
+    const parsedProvider = ProviderIdSchema.parse(provider);
+    const row = database
+      .query<JsonRow, [ProviderId]>("SELECT payload FROM provider_states WHERE provider = ?")
+      .get(parsedProvider);
+    const state = parsePayload(row, ProviderStateSchema);
+    if (state === null) {
+      throw new ApplicationError("STATE_NOT_FOUND", `Missing ${provider} provider state`);
+    }
+    return state;
+  }
+
+  function saveProviderState(state: ProviderState): void {
+    const parsed = ProviderStateSchema.parse(state);
+    if (parsed.activeAccountId !== null) {
+      const active = findAccount(parsed.activeAccountId);
+      if (active === null || active.provider !== parsed.provider) {
+        throw new ApplicationError(
+          "INVALID_ACTIVE_ACCOUNT",
+          `Active account must be a registered ${parsed.provider} account`,
+        );
+      }
+    }
+    database
+      .query(
+        "INSERT INTO provider_states(provider, payload) VALUES (?, ?) ON CONFLICT(provider) DO UPDATE SET payload = excluded.payload",
+      )
+      .run(parsed.provider, serialize(parsed));
+  }
+
+  function saveAutomationPolicy(policy: AutomationPolicy): ProviderState {
+    const parsed = AutomationPolicySchema.parse(policy);
+    const state = { ...findProviderState(parsed.provider), policy: parsed };
+    saveProviderState(state);
+    return state;
+  }
+
+  function listSwitchRecords(limit = 50): SwitchRecord[] {
+    return database
+      .query<JsonRow, [number]>(
+        "SELECT payload FROM switch_records ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(limit)
+      .map((row) => parseRequiredPayload(row, SwitchRecordSchema));
+  }
+
+  function saveSwitchRecord(record: SwitchRecord): void {
+    const parsed = SwitchRecordSchema.parse(record);
+    database
+      .query(
+        "INSERT INTO switch_records(id, provider, created_at, payload) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+      )
+      .run(parsed.id, parsed.provider, parsed.createdAt, serialize(parsed));
+  }
+
+  function commitSwitch(record: SwitchRecord, state: ProviderState): void {
+    const parsedRecord = SwitchRecordSchema.parse(record);
+    const parsedState = ProviderStateSchema.parse(state);
+    if (
+      parsedRecord.phase !== "committed" ||
+      parsedRecord.provider !== parsedState.provider ||
+      parsedRecord.targetAccountId !== parsedState.activeAccountId ||
+      parsedRecord.generation !== parsedState.generation
+    ) {
+      throw new ApplicationError(
+        "INVALID_SWITCH_COMMIT",
+        "Switch record and provider state do not form a valid commit",
+      );
+    }
+    database
+      .transaction(() => {
+        saveSwitchRecord(parsedRecord);
+        saveProviderState(parsedState);
+      })
+      .immediate();
+  }
+
+  function listRuntimeSessions(): RuntimeSession[] {
+    return database
+      .query<JsonRow, []>("SELECT payload FROM runtime_sessions ORDER BY id")
+      .all()
+      .map((row) => parseRequiredPayload(row, RuntimeSessionSchema));
+  }
+
+  function saveRuntimeSession(session: RuntimeSession): void {
+    const parsed = RuntimeSessionSchema.parse(session);
+    database
+      .query(
+        "INSERT INTO runtime_sessions(id, updated_at, payload) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload",
+      )
+      .run(parsed.id, parsed.updatedAt, serialize(parsed));
+  }
+
+  function removeRuntimeSession(sessionId: string): void {
+    database.query("DELETE FROM runtime_sessions WHERE id = ?").run(sessionId);
+  }
+
+  function dashboard(): DashboardSnapshot {
+    return database.transaction(() =>
+      DashboardSnapshotSchema.parse({
+        accounts: listAccounts(),
+        usage: listUsage(),
+        providers: listProviderStates(),
+        sessions: listRuntimeSessions(),
+        sampledAt: new Date().toISOString(),
+      }),
+    )();
+  }
+
+  return {
+    close: () => database.close(),
+    listAccounts,
+    findAccount,
+    saveAccount,
+    removeAccount,
+    listUsage,
+    findUsage,
+    saveUsage,
+    listProviderStates,
+    findProviderState,
+    saveProviderState,
+    saveAutomationPolicy,
+    listSwitchRecords,
+    saveSwitchRecord,
+    commitSwitch,
+    listRuntimeSessions,
+    saveRuntimeSession,
+    removeRuntimeSession,
+    dashboard,
+  };
+}
