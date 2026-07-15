@@ -119,8 +119,7 @@ provider — `/openai` and `/anthropic`. For each request it:
 `config-install.ts` wires the clients to the proxy by editing their real config inside restorable
 managed blocks. Codex gets a `tokmax` model provider in `~/.codex/config.toml` (`base_url` at `/openai`,
 `wire_api = "responses"`); Claude Code gets `ANTHROPIC_BASE_URL` and a placeholder `ANTHROPIC_AUTH_TOKEN`
-in `~/.claude/settings.json`. `tokmax uninstall` restores both. The `tokmax codex` and `tokmax claude`
-wrappers pass the same settings per launch, so they work whether or not the config is installed.
+in `~/.claude/settings.json`. `tokmax uninstall` restores both.
 
 Because there is no app-server, no isolated running profile, no hooks, and no settings mirroring, the
 clients behave exactly as they do natively: `codex exec`, `/status`, the working directory, and

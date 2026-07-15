@@ -37,13 +37,7 @@ There are two independent axes:
 
 tokmax never touches a running process. It changes only which credential the proxy injects, so a switch
 is a local state update that the next request picks up. After `tokmax install`, plain `codex` and
-`claude` route through the proxy; the wrappers do the same per launch and auto-select an account when
-none is active:
-
-```bash
-tokmax codex
-tokmax claude
-```
+`claude` route through the proxy and pick up the active account per request.
 
 ## Requirements
 
@@ -72,21 +66,14 @@ Each login runs in its own isolated provider home. It does not change the accoun
 running process.
 
 ```bash
-tokmax codex login
-tokmax codex login
-
-tokmax claude login --email dexter@example.com
-tokmax claude login
-
-# Repair an expired/revoked login without changing its stable account ID.
-tokmax codex relogin dexter@example.com
-tokmax claude relogin dexter@example.com
+tokmax login codex
+tokmax login claude
 
 tokmax list
 ```
 
-Each account is named by the verified email returned after login. The optional Claude `--email`
-value only pre-fills the provider login; it never overrides the verified identity.
+Each account is named by the verified email returned after login. Re-running `tokmax login` for a
+provider repairs an expired or revoked login in place, without changing its stable account ID.
 Reauthentication pauses the manager for the swap and restarts it afterward, keeping the old credential
 durable until the isolated replacement has been verified and committed.
 
@@ -111,8 +98,7 @@ route through tokmax:
   `ANTHROPIC_AUTH_TOKEN` to a placeholder. The real OAuth token is injected server-side by the proxy;
   the placeholder only satisfies the client's need for a value.
 
-`tokmax uninstall` restores both files exactly. Install is optional: the `tokmax codex` and
-`tokmax claude` wrappers apply the same routing per launch.
+`tokmax uninstall` restores both files exactly.
 
 ## Select an account and launch
 
@@ -120,19 +106,13 @@ route through tokmax:
 tokmax switch codex dexter@example.com
 tokmax switch claude dexter@example.com
 
-# with config installed:
+# after tokmax install, run the native clients directly:
 codex
 claude
-
-# or per-launch, auto-selecting an account when none is active:
-tokmax codex
-tokmax claude
 ```
 
-Launching through a wrapper with no active account selects one automatically — healthy accounts first,
-lowest usage pressure wins — and prints the choice. The clients run natively against the real
-`~/.codex` and `~/.claude`, so `codex exec`, `/status`, the working directory, and subagents all behave
-normally.
+The clients run natively against the real `~/.codex` and `~/.claude`, so `codex exec`, `/status`, the
+working directory, and subagents all behave normally.
 
 `tokmax switch` is near-instant (~2s, dominated by a single verification probe of the target
 credential). It probes the target to confirm the credential is usable, then commits the new active
@@ -152,17 +132,17 @@ tokmax
 Or get machine-readable state:
 
 ```bash
-tokmax status --json
+tokmax status
 tokmax refresh
 ```
 
-Automatic rotation is disabled by default. Enabling it requires an explicit confirmation that your
-provider permits this use of the accounts:
+Automatic rotation is disabled by default. Enabling it from the CLI is itself your confirmation that
+your provider permits this use of the accounts:
 
 ```bash
-tokmax auto codex on --threshold 95 --authorized
-tokmax auto claude on --threshold 95 --authorized
-tokmax auto both on --threshold 95 --authorized
+tokmax auto codex on --threshold 95
+tokmax auto claude on --threshold 95
+tokmax auto both on --threshold 95
 
 tokmax auto codex off
 tokmax auto claude off
@@ -180,7 +160,7 @@ A failed or expired reading is `unknown`, never `0%`.
 
 ## Daemon commands
 
-The dashboard and wrappers start the local daemon when needed.
+The dashboard and other tokmax commands start the local daemon when needed.
 
 ```bash
 tokmax daemon start
@@ -215,9 +195,9 @@ parties from routing subscription credentials without approval.
 [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance) ·
 [Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
 
-For that reason, the project ships monitoring and manual switching normally, but requires
-`--authorized` before automatic rotation can be enabled. That flag records your confirmation; it is not
-legal advice or provider approval.
+For that reason, the project ships monitoring and manual switching normally, and automatic rotation is
+off by default. Enabling it from the CLI records your confirmation; it is not legal advice or provider
+approval.
 
 ## Development
 
