@@ -8,6 +8,7 @@ import {
   historyStats,
   meter,
   percentLabel,
+  relativeAge,
   shortWindow,
   sparkline,
 } from "./format.ts";
@@ -86,5 +87,12 @@ describe("tui format", () => {
   test("history stats report now, peak, and average", () => {
     expect(historyStats(points([10, 90, 50]))).toEqual({ now: 50, peak: 90, average: 50 });
     expect(historyStats([])).toEqual({ now: null, peak: null, average: null });
+  });
+
+  test("relative age compresses to the largest unit", () => {
+    const now = 1_000_000_000;
+    expect(relativeAge(now - 3_000, now)).toBe("3s");
+    expect(relativeAge(now - 90_000, now)).toBe("1m");
+    expect(relativeAge(now - 7_200_000, now)).toBe("2h");
   });
 });

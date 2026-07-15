@@ -5,7 +5,6 @@ import type {
   DashboardSnapshot,
   ProviderId,
   ProviderState,
-  UsageHistory,
   UsageWindow,
 } from "../domain.ts";
 import { readAnalytics, refreshUsage, requestPolicy, requestSwitch } from "../ipc.ts";
@@ -17,8 +16,8 @@ import {
   meter,
   percentLabel,
   pressureColor,
+  relativeAge,
   shortWindow,
-  sparkline,
   type Theme,
   type ThemeName,
   themes,
@@ -218,67 +217,93 @@ function tabBar(ctx: Ctx, tab: Tab) {
     { flexDirection: "row", gap: 1 },
     pill("Overview", tab === "overview"),
     pill("Analytics", tab === "analytics"),
-    Text({ content: "   tab to switch", fg: rgb(ctx.theme.faint) }),
   );
 }
 
-// One selectable trend line per account: label, worst-window sparkline, now%.
-function analyticsRow(
-  ctx: Ctx,
-  account: Account,
-  history: UsageHistory[],
-  window: UsageWindow | null,
-  isSelected: boolean,
-) {
-  const series = window === null ? undefined : history.find((h) => h.windowId === window.id);
-  const color = pressureColor(ctx.theme, window?.usedPercent ?? null);
+function statTile(ctx: Ctx, value: string, label: string, color: string) {
+  return Box(
+    { flexDirection: "row", paddingLeft: 1, paddingRight: 1 },
+    Text({ content: value, fg: rgb(color), attributes: 1 }),
+    Text({ content: ` ${label}`, fg: rgb(ctx.theme.dim) }),
+  );
+}
+
+// Global summary across every account — a real at-a-glance header row.
+function glanceTiles(ctx: Ctx, analytics: AnalyticsSnapshot) {
+  const accounts = analytics.snapshot.accounts;
+  const flagged = accounts.filter((a) => healthBadge(ctx.theme, a) !== null).length;
+  const autoOn = analytics.snapshot.providers.filter((p) => p.policy.enabled).length;
+  const hottest = analytics.snapshot.usage
+    .flatMap((u) => u.windows.filter((w) => w.kind === "hard").map((w) => w.usedPercent))
+    .reduce((max, value) => Math.max(max, value), 0);
+  const divider = () => Text({ content: " · ", fg: rgb(ctx.theme.faint) });
   return Box(
     {
       flexDirection: "row",
       width: "100%",
-      backgroundColor: isSelected ? rgb(ctx.theme.selected) : rgb(ctx.theme.bg),
+      paddingLeft: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: rgb(ctx.theme.border),
+      title: " at a glance ",
+      titleColor: rgb(ctx.theme.dim),
     },
-    Text({
-      content: ` ${isSelected ? "▸" : " "} ${pad(account.label, labelWidth)}`,
-      fg: rgb(isSelected ? ctx.theme.fg : ctx.theme.dim),
-      attributes: isSelected ? 1 : 0,
-    }),
-    Text({
-      content: `${pad(window === null ? "" : shortWindow(window.label), 6)} `,
-      fg: rgb(ctx.theme.dim),
-    }),
-    Text({ content: sparkline(series?.points ?? [], 28), fg: rgb(color) }),
-    Text({ content: ` ${percentLabel(window?.usedPercent ?? null)}`, fg: rgb(color) }),
+    statTile(ctx, `${accounts.length}`, "accounts", ctx.theme.fg),
+    divider(),
+    statTile(ctx, `${accounts.length - flagged}`, "healthy", ctx.theme.good),
+    divider(),
+    statTile(ctx, `${flagged}`, "need attention", flagged > 0 ? ctx.theme.bad : ctx.theme.dim),
+    divider(),
+    statTile(ctx, `${Math.round(hottest)}%`, "hottest window", pressureColor(ctx.theme, hottest)),
+    divider(),
+    statTile(
+      ctx,
+      autoOn === 0 ? "off" : `${autoOn}/2`,
+      "auto-rotate",
+      autoOn > 0 ? ctx.theme.good : ctx.theme.dim,
+    ),
   );
 }
 
-function focusChart(ctx: Ctx, analytics: AnalyticsSnapshot, row: Row | undefined, height: number) {
-  const account =
-    row === undefined ? undefined : analytics.snapshot.accounts.find((a) => a.id === row.accountId);
-  const usage =
-    row === undefined
+// The active account's worst-window usage over time — what is actually being
+// consumed for a provider right now. Global: no selection required.
+function providerTrend(
+  ctx: Ctx,
+  analytics: AnalyticsSnapshot,
+  provider: ProviderId,
+  height: number,
+) {
+  const state = analytics.snapshot.providers.find((s) => s.provider === provider);
+  const active =
+    state?.activeAccountId == null
       ? undefined
-      : analytics.snapshot.usage.find((u) => u.accountId === row.accountId);
+      : analytics.snapshot.accounts.find((a) => a.id === state.activeAccountId);
+  const usage =
+    active === undefined
+      ? undefined
+      : analytics.snapshot.usage.find((u) => u.accountId === active.id);
   const window = worstWindow(usage?.windows ?? []);
   const series =
-    account === undefined || window === null
+    active === undefined || window === null
       ? undefined
       : analytics.history
-          .find((h) => h.accountId === account.id)
+          .find((h) => h.accountId === active.id)
           ?.windows.find((w) => w.windowId === window.id);
   const stats = historyStats(series?.points ?? []);
   const color = pressureColor(ctx.theme, window?.usedPercent ?? null);
-  const chartWidth = 64;
   const body: ReturnType<typeof Box>[] = [];
-  if (account === undefined || window === null) {
+  if (active === undefined || window === null) {
     body.push(
       Box(
         { flexDirection: "row" },
-        Text({ content: "  select an account", fg: rgb(ctx.theme.dim) }),
+        Text({
+          content: active === undefined ? "  no active account" : "  waiting for usage…",
+          fg: rgb(ctx.theme.dim),
+        }),
       ),
     );
   } else {
-    areaChart(series?.points ?? [], chartWidth, height).forEach((line, index, all) => {
+    areaChart(series?.points ?? [], 70, height).forEach((line, index, all) => {
       const axis = index === 0 ? "100" : index === all.length - 1 ? "  0" : "   ";
       body.push(
         Box(
@@ -291,7 +316,8 @@ function focusChart(ctx: Ctx, analytics: AnalyticsSnapshot, row: Row | undefined
     body.push(
       Box(
         { flexDirection: "row" },
-        Text({ content: `     now ${percentLabel(stats.now).trim()}`, fg: rgb(color) }),
+        Text({ content: `     ${shortWindow(window.label)}  now `, fg: rgb(ctx.theme.dim) }),
+        Text({ content: `${Math.round(window.usedPercent)}%`, fg: rgb(color), attributes: 1 }),
         Text({
           content: `   peak ${stats.peak ?? "—"}%   avg ${stats.average ?? "—"}%   · ${series?.points.length ?? 0} samples`,
           fg: rgb(ctx.theme.dim),
@@ -300,9 +326,9 @@ function focusChart(ctx: Ctx, analytics: AnalyticsSnapshot, row: Row | undefined
     );
   }
   const title =
-    account === undefined || window === null
-      ? " usage over time "
-      : ` ${account.label} · ${shortWindow(window.label)} · usage over time `;
+    active === undefined
+      ? ` ${providerTitles[provider]} — no active account `
+      : ` ${providerTitles[provider]} — ${active.label} `;
   return Box(
     {
       flexDirection: "column",
@@ -318,33 +344,12 @@ function focusChart(ctx: Ctx, analytics: AnalyticsSnapshot, row: Row | undefined
   );
 }
 
-function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], selected: number) {
-  const chartHeight = Math.max(
-    4,
-    Math.min(12, (process.stdout.rows ?? 40) - analytics.snapshot.accounts.length - 12),
-  );
-  const accountRows = rows.map((row, index) => {
-    const account = analytics.snapshot.accounts.find((a) => a.id === row.accountId);
-    const usage = analytics.snapshot.usage.find((u) => u.accountId === row.accountId);
-    const history = analytics.history.find((h) => h.accountId === row.accountId)?.windows ?? [];
-    return account === undefined
-      ? Box({ width: "100%" })
-      : analyticsRow(ctx, account, history, worstWindow(usage?.windows ?? []), index === selected);
-  });
+function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot) {
+  const chartHeight = Math.max(3, Math.min(9, Math.floor(((process.stdout.rows ?? 40) - 16) / 2)));
   return [
-    Box(
-      {
-        flexDirection: "column",
-        width: "100%",
-        border: true,
-        borderStyle: "rounded",
-        borderColor: rgb(ctx.theme.border),
-        title: " accounts · worst window trend ",
-        titleColor: rgb(ctx.theme.dim),
-      },
-      ...accountRows,
-    ),
-    focusChart(ctx, analytics, rows[selected], chartHeight),
+    glanceTiles(ctx, analytics),
+    providerTrend(ctx, analytics, "openai", chartHeight),
+    providerTrend(ctx, analytics, "anthropic", chartHeight),
   ];
 }
 
@@ -365,11 +370,19 @@ function view(
   tab: Tab,
   note: string,
 ) {
-  const clock = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const now = Date.now();
+  const clock = new Date(now).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // Freshness = the most recently probed account; the daemon probes the active
+  // account every 60s and idle accounts every 5m.
+  const freshestMillis = analytics.snapshot.usage
+    .map((u) => Date.parse(u.observedAt))
+    .filter((millis) => Number.isFinite(millis))
+    .reduce((max, millis) => Math.max(max, millis), 0);
+  const refreshed = freshestMillis === 0 ? "—" : `${relativeAge(freshestMillis, now)} ago`;
   const footer =
     tab === "overview"
-      ? "↑↓ select · ⏎ switch · a auto-rotate · tab analytics · r refresh · q quit"
-      : "↑↓ select account · tab overview · r refresh · q quit";
+      ? "↑↓ select · ⏎ switch · a auto-rotate · ←→ tabs · r refresh"
+      : "←→ tabs · r refresh";
   return Box(
     {
       flexDirection: "column",
@@ -383,6 +396,10 @@ function view(
       { flexDirection: "row" },
       Text({ content: "tokmax", fg: rgb(ctx.theme.accent), attributes: 1 }),
       Text({ content: `  ${clock}`, fg: rgb(ctx.theme.dim) }),
+      Text({
+        content: `   ↻ refreshed ${refreshed}  ·  active 60s / idle 5m`,
+        fg: rgb(ctx.theme.faint),
+      }),
       note === ""
         ? Text({ content: "" })
         : Text({ content: `   ${note}`, fg: rgb(ctx.theme.warn) }),
@@ -390,7 +407,7 @@ function view(
     tabBar(ctx, tab),
     ...(tab === "overview"
       ? overviewBody(ctx, analytics.snapshot, rows, selected)
-      : analyticsBody(ctx, analytics, rows, selected)),
+      : analyticsBody(ctx, analytics)),
     Text({ content: footer, fg: rgb(ctx.theme.dim) }),
   );
 }
@@ -470,6 +487,12 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
       await requestSwitch(socketPath, row.provider, row.accountId);
       analytics = await readAnalytics(socketPath);
       rows = orderedRows(analytics.snapshot);
+      // The switched account jumps to the top of its group; keep the cursor on
+      // it rather than on whatever now occupies the old row index.
+      const moved = rows.findIndex((r) => r.accountId === row.accountId);
+      if (moved >= 0) {
+        selected = moved;
+      }
     });
   };
 
@@ -515,7 +538,7 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
       try {
         if (key.name === "q" || (key.ctrl && key.name === "c")) {
           finish();
-        } else if (key.name === "tab" || key.name === "left" || key.name === "right") {
+        } else if (key.name === "left" || key.name === "right") {
           tab = tab === "overview" ? "analytics" : "overview";
           paint();
         } else if (key.name === "up" || key.name === "k") {

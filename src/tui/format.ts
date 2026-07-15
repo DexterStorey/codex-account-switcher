@@ -139,6 +139,22 @@ export function areaChart(
   return rows;
 }
 
+export function relativeAge(observedAtMillis: number, nowMillis: number): string {
+  const seconds = Math.max(0, Math.round((nowMillis - observedAtMillis) / 1000));
+  if (!Number.isFinite(seconds)) {
+    return "?";
+  }
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
 export function historyStats(points: readonly UsageHistoryPoint[]): {
   now: number | null;
   peak: number | null;
