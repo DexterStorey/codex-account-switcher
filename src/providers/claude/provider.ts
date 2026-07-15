@@ -2,7 +2,12 @@ import { type Account, AccountEmailSchema } from "../../domain.ts";
 import { ApplicationError } from "../../errors.ts";
 import type { FetchImplementation } from "../../http.ts";
 import type { ProviderAdapter, ProviderProbeResult } from "../provider.ts";
-import { defaultClaudeCredentialReader, fetchClaudeProfile, refreshClaudeProfile } from "./auth.ts";
+import {
+  claudePlanTier,
+  defaultClaudeCredentialReader,
+  fetchClaudeProfile,
+  refreshClaudeProfile,
+} from "./auth.ts";
 import { fetchClaudeUsage } from "./usage.ts";
 
 export interface AnthropicProviderDependencies {
@@ -117,6 +122,7 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
     return {
       account: {
         ...anthropicAccount,
+        plan: claudePlanTier(credential) ?? anthropicAccount.plan ?? null,
         label: email.success ? email.data : anthropicAccount.label,
         identity: email.success ? email.data : anthropicAccount.identity,
         health: health(credential.refreshTokenExpiresAt, this.#dependencies.now()),

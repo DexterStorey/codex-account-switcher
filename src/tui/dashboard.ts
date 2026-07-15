@@ -9,21 +9,27 @@ import type {
 } from "../domain.ts";
 import { readAnalytics, refreshUsage, requestPolicy, requestSwitch } from "../ipc.ts";
 import {
-  areaChart,
+  brailleLine,
+  bucketSeries,
   detectThemeName,
   healthBadge,
-  historyStats,
+  mergedPressureSeries,
   meter,
   percentLabel,
+  planLabel,
   pressureColor,
   relativeAge,
+  resetCountdown,
   shortWindow,
   type Theme,
   type ThemeName,
+  TIMEFRAMES,
+  type Timeframe,
   themes,
 } from "./format.ts";
 
-type Tab = "overview" | "analytics";
+type Tab = "accounts" | "analytics";
+type Scope = ProviderId | "both";
 
 const colorCache = new Map<string, RGBA>();
 function rgb(hex: string): RGBA {
@@ -41,12 +47,21 @@ const providerTitles: Record<ProviderId, string> = {
   openai: "OpenAI · Codex",
   anthropic: "Anthropic · Claude Code",
 };
+const providerShort: Record<ProviderId, string> = { openai: "Codex", anthropic: "Claude Code" };
 const providerCli: Record<ProviderId, string> = { openai: "codex", anthropic: "claude" };
 const providerOrder: readonly ProviderId[] = ["openai", "anthropic"];
+const scopeOrder: readonly Scope[] = ["openai", "anthropic", "both"];
+const scopeLabel: Record<Scope, string> = { openai: "codex", anthropic: "claude", both: "both" };
+const fallbackTimeframe = TIMEFRAMES[2] as Timeframe;
 
 interface Row {
   provider: ProviderId;
   accountId: string;
+}
+
+interface Ctx {
+  theme: Theme;
+  now: number;
 }
 
 function pad(value: string, width: number): string {
@@ -54,13 +69,13 @@ function pad(value: string, width: number): string {
   return fitted.padEnd(width);
 }
 
-function worstWindow(windows: readonly UsageWindow[]): UsageWindow | null {
-  return windows
-    .filter((w) => w.kind === "hard")
-    .reduce<UsageWindow | null>(
-      (acc, w) => (acc === null || w.usedPercent > acc.usedPercent ? w : acc),
-      null,
-    );
+function hardWindows(windows: readonly UsageWindow[]): UsageWindow[] {
+  return windows.filter((window) => window.kind === "hard");
+}
+
+function currentPressure(windows: readonly UsageWindow[]): number | null {
+  const hard = hardWindows(windows);
+  return hard.length === 0 ? null : Math.max(...hard.map((window) => window.usedPercent));
 }
 
 function orderedRows(snapshot: DashboardSnapshot): Row[] {
@@ -81,10 +96,6 @@ function orderedRows(snapshot: DashboardSnapshot): Row[] {
   return rows;
 }
 
-interface Ctx {
-  theme: Theme;
-}
-
 // One account line showing every window inline, each colored by its pressure,
 // so all rates stay visible without expanding anything.
 function accountLine(
@@ -97,8 +108,6 @@ function accountLine(
   const badge = healthBadge(ctx.theme, account);
   const marker = isActive ? "●" : isSelected ? "▸" : "○";
   const markerColor = isActive ? ctx.theme.good : isSelected ? ctx.theme.accent : ctx.theme.faint;
-  // The label field reserves its last column for an attention asterisk so the
-  // windows stay column-aligned whether or not an account is flagged.
   const children = [
     Text({ content: ` ${marker} `, fg: rgb(markerColor) }),
     Text({
@@ -113,7 +122,7 @@ function accountLine(
       Text({ content: account.health === "ready" ? " …" : " —", fg: rgb(ctx.theme.dim) }),
     );
   }
-  for (const window of windows.slice(0, 3)) {
+  for (const window of hardWindows(windows).slice(0, 3)) {
     children.push(
       Text({ content: ` ${shortWindow(window.label)} `, fg: rgb(ctx.theme.dim) }),
       Text({
@@ -132,18 +141,76 @@ function accountLine(
   );
 }
 
+// The expansion shown under the selected account on space: plan, each window's
+// reset countdown, and identifying detail — the "everything about this account"
+// view without leaving the list.
+function accountDetail(ctx: Ctx, account: Account, windows: readonly UsageWindow[]) {
+  const indent = " ".repeat(5);
+  const plan = planLabel(account.plan);
+  const lines: ReturnType<typeof Box>[] = [
+    Box(
+      { flexDirection: "row", backgroundColor: rgb(ctx.theme.selected) },
+      Text({ content: `${indent}${providerShort[account.provider]}`, fg: rgb(ctx.theme.dim) }),
+      Text({
+        content: plan === null ? "  ·  plan —" : `  ·  ${plan}`,
+        fg: rgb(plan === null ? ctx.theme.dim : ctx.theme.accent),
+        attributes: plan === null ? 0 : 1,
+      }),
+    ),
+  ];
+  const hard = hardWindows(windows);
+  if (hard.length === 0) {
+    lines.push(
+      Box(
+        { flexDirection: "row", backgroundColor: rgb(ctx.theme.selected) },
+        Text({
+          content: `${indent}${account.health === "ready" ? "waiting for usage…" : "usage unavailable"}`,
+          fg: rgb(ctx.theme.dim),
+        }),
+      ),
+    );
+  }
+  for (const window of hard) {
+    const reset = resetCountdown(window.resetAt, ctx.now);
+    lines.push(
+      Box(
+        { flexDirection: "row", backgroundColor: rgb(ctx.theme.selected) },
+        Text({ content: `${indent}${pad(window.label, 16)} `, fg: rgb(ctx.theme.dim) }),
+        Text({
+          content: `${meter(window.usedPercent, 8)} ${percentLabel(window.usedPercent)}`,
+          fg: rgb(pressureColor(ctx.theme, window.usedPercent)),
+        }),
+        Text({
+          content: reset === null ? "" : `   resets in ${reset}`,
+          fg: rgb(ctx.theme.dim),
+        }),
+      ),
+    );
+  }
+  const shortId = account.externalAccountId?.slice(0, 8) ?? "—";
+  const added = account.createdAt.slice(0, 10);
+  lines.push(
+    Box(
+      { flexDirection: "row", backgroundColor: rgb(ctx.theme.selected) },
+      Text({ content: `${indent}account ${shortId}  ·  added ${added}`, fg: rgb(ctx.theme.faint) }),
+    ),
+  );
+  return lines;
+}
+
 function providerPanel(
   ctx: Ctx,
   snapshot: DashboardSnapshot,
   provider: ProviderId,
   rows: Row[],
   selected: number,
+  expanded: boolean,
 ) {
   const state: ProviderState | undefined = snapshot.providers.find((s) => s.provider === provider);
   const providerRows = rows
     .map((row, index) => ({ row, index }))
     .filter((entry) => entry.row.provider === provider);
-  const lines =
+  const lines: ReturnType<typeof Box>[] =
     providerRows.length === 0
       ? [
           Box(
@@ -154,24 +221,30 @@ function providerPanel(
             }),
           ),
         ]
-      : providerRows.map((entry) => {
+      : providerRows.flatMap((entry) => {
           const account = snapshot.accounts.find((a) => a.id === entry.row.accountId);
-          const usage = snapshot.usage.find((u) => u.accountId === entry.row.accountId);
-          return account === undefined
-            ? Box({ width: "100%" })
-            : accountLine(
-                ctx,
-                account,
-                usage?.windows ?? [],
-                state?.activeAccountId === entry.row.accountId,
-                entry.index === selected,
-              );
+          if (account === undefined) {
+            return [Box({ width: "100%" })];
+          }
+          const windows = snapshot.usage.find((u) => u.accountId === entry.row.accountId)?.windows;
+          const isSelected = entry.index === selected;
+          const line = accountLine(
+            ctx,
+            account,
+            windows ?? [],
+            state?.activeAccountId === entry.row.accountId,
+            isSelected,
+          );
+          return isSelected && expanded
+            ? [line, ...accountDetail(ctx, account, windows ?? [])]
+            : [line];
         });
   const auto = state?.policy.enabled ? `⟳ auto ${state.policy.thresholdPercent}%` : "auto off";
   return Box(
     {
       flexDirection: "column",
       width: "100%",
+      flexShrink: 0,
       border: true,
       borderStyle: "rounded",
       borderColor: rgb(ctx.theme.border),
@@ -183,22 +256,20 @@ function providerPanel(
 }
 
 // Explains the attention asterisk, shown only when an account is flagged.
-function legend(ctx: Ctx, snapshot: DashboardSnapshot) {
+// Returns null when nothing is flagged so the caller can omit the row entirely.
+function legend(ctx: Ctx, snapshot: DashboardSnapshot): ReturnType<typeof Box> | null {
   const flagged = snapshot.accounts
     .map((account) => healthBadge(ctx.theme, account))
     .filter((badge): badge is NonNullable<typeof badge> => badge !== null);
   if (flagged.length === 0) {
-    return Text({ content: "" });
+    return null;
   }
   const distinct = [...new Map(flagged.map((badge) => [badge.text, badge])).values()];
   return Box(
     { flexDirection: "row" },
     Text({ content: " * ", fg: rgb(ctx.theme.warn) }),
-    ...distinct.flatMap((badge, index) => [
-      Text({
-        content: `${index === 0 ? "" : "· "}${badge.text.replace(/^[⚠·]\s*/, "")}`,
-        fg: rgb(badge.color),
-      }),
+    ...distinct.flatMap((badge) => [
+      Text({ content: badge.text.replace(/^[⚠·]\s*/, ""), fg: rgb(badge.color) }),
       Text({ content: " ", fg: rgb(ctx.theme.dim) }),
     ]),
     Text({ content: "— run tokmax list", fg: rgb(ctx.theme.dim) }),
@@ -215,63 +286,47 @@ function tabBar(ctx: Ctx, tab: Tab) {
     });
   return Box(
     { flexDirection: "row", gap: 1 },
-    pill("Overview", tab === "overview"),
+    pill("Accounts", tab === "accounts"),
     pill("Analytics", tab === "analytics"),
   );
 }
 
-function statTile(ctx: Ctx, value: string, label: string, color: string) {
+// The scope + timeframe selectors, each a row of pills with the active one lit.
+function analyticsControls(ctx: Ctx, scope: Scope, timeframe: Timeframe) {
+  const toggle = (label: string, active: boolean) =>
+    Text({
+      content: ` ${label} `,
+      fg: rgb(active ? ctx.theme.bg : ctx.theme.dim),
+      bg: rgb(active ? ctx.theme.accent : ctx.theme.bg),
+      attributes: active ? 1 : 0,
+    });
+  const scopeCells = scopeOrder.flatMap((option, index) => [
+    ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
+    toggle(scopeLabel[option], option === scope),
+  ]);
+  const rangeCells = TIMEFRAMES.flatMap((option, index) => [
+    ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
+    toggle(option.label, option.key === timeframe.key),
+  ]);
   return Box(
-    { flexDirection: "row", paddingLeft: 1, paddingRight: 1 },
-    Text({ content: value, fg: rgb(color), attributes: 1 }),
-    Text({ content: ` ${label}`, fg: rgb(ctx.theme.dim) }),
+    { flexDirection: "row", width: "100%", paddingLeft: 1 },
+    ...scopeCells,
+    Box({ flexGrow: 1 }),
+    ...rangeCells,
+    Text({ content: " ", fg: rgb(ctx.theme.bg) }),
   );
 }
 
-// Global summary across every account — a real at-a-glance header row.
-function glanceTiles(ctx: Ctx, analytics: AnalyticsSnapshot) {
-  const accounts = analytics.snapshot.accounts;
-  const flagged = accounts.filter((a) => healthBadge(ctx.theme, a) !== null).length;
-  const autoOn = analytics.snapshot.providers.filter((p) => p.policy.enabled).length;
-  const hottest = analytics.snapshot.usage
-    .flatMap((u) => u.windows.filter((w) => w.kind === "hard").map((w) => w.usedPercent))
-    .reduce((max, value) => Math.max(max, value), 0);
-  const divider = () => Text({ content: " · ", fg: rgb(ctx.theme.faint) });
-  return Box(
-    {
-      flexDirection: "row",
-      width: "100%",
-      paddingLeft: 1,
-      border: true,
-      borderStyle: "rounded",
-      borderColor: rgb(ctx.theme.border),
-      title: " at a glance ",
-      titleColor: rgb(ctx.theme.dim),
-    },
-    statTile(ctx, `${accounts.length}`, "accounts", ctx.theme.fg),
-    divider(),
-    statTile(ctx, `${accounts.length - flagged}`, "healthy", ctx.theme.good),
-    divider(),
-    statTile(ctx, `${flagged}`, "need attention", flagged > 0 ? ctx.theme.bad : ctx.theme.dim),
-    divider(),
-    statTile(ctx, `${Math.round(hottest)}%`, "hottest window", pressureColor(ctx.theme, hottest)),
-    divider(),
-    statTile(
-      ctx,
-      autoOn === 0 ? "off" : `${autoOn}/2`,
-      "auto-rotate",
-      autoOn > 0 ? ctx.theme.good : ctx.theme.dim,
-    ),
-  );
-}
-
-// The active account's worst-window usage over time — what is actually being
-// consumed for a provider right now. Global: no selection required.
-function providerTrend(
+// One provider's usage trace over the chosen timeframe: a braille line chart of
+// the account's worst-window pressure, framed by a 0/100 axis and live metrics.
+function chartCard(
   ctx: Ctx,
   analytics: AnalyticsSnapshot,
   provider: ProviderId,
+  timeframe: Timeframe,
   height: number,
+  width: number,
+  showTimeAxis: boolean,
 ) {
   const state = analytics.snapshot.providers.find((s) => s.provider === provider);
   const active =
@@ -282,53 +337,95 @@ function providerTrend(
     active === undefined
       ? undefined
       : analytics.snapshot.usage.find((u) => u.accountId === active.id);
-  const window = worstWindow(usage?.windows ?? []);
-  const series =
-    active === undefined || window === null
-      ? undefined
-      : analytics.history
-          .find((h) => h.accountId === active.id)
-          ?.windows.find((w) => w.windowId === window.id);
-  const stats = historyStats(series?.points ?? []);
-  const color = pressureColor(ctx.theme, window?.usedPercent ?? null);
+  const hard = hardWindows(usage?.windows ?? []);
+  const hardIds = new Set(hard.map((window) => window.id));
+  const history = analytics.history.find((h) => h.accountId === active?.id);
+  const series = mergedPressureSeries(
+    (history?.windows ?? []).filter((window) => hardIds.has(window.windowId)),
+  );
+  const plan = active === undefined ? null : planLabel(active.plan);
+  const title =
+    active === undefined
+      ? ` ${providerShort[provider]} · no active account `
+      : ` ${providerShort[provider]} · ${active.label}${plan === null ? "" : ` · ${plan}`} `;
+
   const body: ReturnType<typeof Box>[] = [];
-  if (active === undefined || window === null) {
+  if (active === undefined) {
     body.push(
       Box(
         { flexDirection: "row" },
         Text({
-          content: active === undefined ? "  no active account" : "  waiting for usage…",
+          content: `  tokmax login ${providerCli[provider]} to begin`,
           fg: rgb(ctx.theme.dim),
         }),
       ),
     );
   } else {
-    areaChart(series?.points ?? [], 70, height).forEach((line, index, all) => {
-      const axis = index === 0 ? "100" : index === all.length - 1 ? "  0" : "   ";
+    const columns = bucketSeries(series, timeframe.ms, ctx.now, width * 2);
+    const drawn = columns.filter((value): value is number => value !== null);
+    const nowPercent = currentPressure(usage?.windows ?? []);
+    const color = pressureColor(ctx.theme, nowPercent);
+    const chart =
+      drawn.length === 0
+        ? new Array(height).fill(" ".repeat(width))
+        : brailleLine(columns, width, height);
+    chart.forEach((line, index) => {
+      const axis = index === 0 ? "100" : index === chart.length - 1 ? "  0" : "   ";
       body.push(
         Box(
           { flexDirection: "row" },
-          Text({ content: ` ${axis} `, fg: rgb(ctx.theme.faint) }),
+          Text({ content: `${axis} `, fg: rgb(ctx.theme.faint) }),
           Text({ content: line, fg: rgb(color) }),
         ),
       );
     });
-    body.push(
-      Box(
-        { flexDirection: "row" },
-        Text({ content: `     ${shortWindow(window.label)}  now `, fg: rgb(ctx.theme.dim) }),
-        Text({ content: `${Math.round(window.usedPercent)}%`, fg: rgb(color), attributes: 1 }),
-        Text({
-          content: `   peak ${stats.peak ?? "—"}%   avg ${stats.average ?? "—"}%   · ${series?.points.length ?? 0} samples`,
-          fg: rgb(ctx.theme.dim),
-        }),
-      ),
-    );
+    if (showTimeAxis) {
+      const timeAxis = `${timeframe.label} ago`.padEnd(Math.max(0, width - 3));
+      body.push(
+        Box(
+          { flexDirection: "row" },
+          Text({ content: "    ", fg: rgb(ctx.theme.bg) }),
+          Text({ content: timeAxis, fg: rgb(ctx.theme.faint) }),
+          Text({ content: "now", fg: rgb(ctx.theme.faint) }),
+        ),
+      );
+    }
+    if (drawn.length === 0) {
+      body.push(
+        Box(
+          { flexDirection: "row" },
+          Text({ content: "    collecting usage…", fg: rgb(ctx.theme.dim) }),
+        ),
+      );
+    } else {
+      const peak = Math.round(Math.max(...drawn));
+      const average = Math.round(drawn.reduce((sum, value) => sum + value, 0) / drawn.length);
+      // Show the two windows that reset soonest — the ones worth knowing about —
+      // so a third window can never push the line past the panel edge.
+      const resets = hard
+        .map((window) => ({
+          label: shortWindow(window.label),
+          reset: resetCountdown(window.resetAt, ctx.now),
+          at: window.resetAt === null ? Number.POSITIVE_INFINITY : Date.parse(window.resetAt),
+        }))
+        .filter((entry) => entry.reset !== null)
+        .sort((left, right) => left.at - right.at)
+        .slice(0, 2)
+        .map((entry) => `${entry.label} ${entry.reset}`);
+      const prefix = "    now ";
+      const nowText = nowPercent === null ? "—" : `${Math.round(nowPercent)}%`;
+      const tail = `   peak ${peak}%   avg ${average}%${resets.length === 0 ? "" : `   resets ${resets.join(" · ")}`}`;
+      const budget = Math.max(0, width - prefix.length - nowText.length);
+      body.push(
+        Box(
+          { flexDirection: "row" },
+          Text({ content: prefix, fg: rgb(ctx.theme.dim) }),
+          Text({ content: nowText, fg: rgb(color), attributes: 1 }),
+          Text({ content: tail.slice(0, budget), fg: rgb(ctx.theme.faint) }),
+        ),
+      );
+    }
   }
-  const title =
-    active === undefined
-      ? ` ${providerTitles[provider]} — no active account `
-      : ` ${providerTitles[provider]} — ${active.label} `;
   return Box(
     {
       flexDirection: "column",
@@ -344,46 +441,95 @@ function providerTrend(
   );
 }
 
-function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot) {
-  const chartHeight = Math.max(3, Math.min(9, Math.floor(((process.stdout.rows ?? 40) - 16) / 2)));
-  return [
-    glanceTiles(ctx, analytics),
-    providerTrend(ctx, analytics, "openai", chartHeight),
-    providerTrend(ctx, analytics, "anthropic", chartHeight),
-  ];
+function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot, scope: Scope, timeframe: Timeframe) {
+  const cols = process.stdout.columns ?? 80;
+  const rows = process.stdout.rows ?? 24;
+  const width = Math.max(24, Math.min(160, cols - 8));
+  const controls = analyticsControls(ctx, scope, timeframe);
+  if (scope === "both") {
+    // Two stacked cards must share the height, so they run compact: shorter
+    // traces and no per-card time axis (the range toggle already names it).
+    const height = Math.max(3, Math.min(6, Math.floor((rows - 18) / 2)));
+    return [
+      controls,
+      chartCard(ctx, analytics, "openai", timeframe, height, width, false),
+      chartCard(ctx, analytics, "anthropic", timeframe, height, width, false),
+    ];
+  }
+  const height = Math.max(4, Math.min(11, rows - 15));
+  return [controls, chartCard(ctx, analytics, scope, timeframe, height, width, true)];
 }
 
-function overviewBody(ctx: Ctx, snapshot: DashboardSnapshot, rows: Row[], selected: number) {
-  return [
-    providerPanel(ctx, snapshot, "openai", rows, selected),
-    providerPanel(ctx, snapshot, "anthropic", rows, selected),
-    Box({ flexGrow: 1, width: "100%" }),
-    legend(ctx, snapshot),
-  ];
-}
-
-function view(
+function accountsBody(
   ctx: Ctx,
-  analytics: AnalyticsSnapshot,
+  snapshot: DashboardSnapshot,
   rows: Row[],
   selected: number,
-  tab: Tab,
-  installed: boolean,
-  note: string,
+  expanded: boolean,
 ) {
-  const now = Date.now();
-  const clock = new Date(now).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  // Freshness = the most recently probed account; the daemon probes the active
-  // account every 60s and idle accounts every 5m.
+  const note = legend(ctx, snapshot);
+  return [
+    providerPanel(ctx, snapshot, "openai", rows, selected, expanded),
+    providerPanel(ctx, snapshot, "anthropic", rows, selected, expanded),
+    Box({ flexGrow: 1, width: "100%" }),
+    ...(note === null ? [] : [note]),
+  ];
+}
+
+interface ViewState {
+  tab: Tab;
+  selected: number;
+  expanded: boolean;
+  scope: Scope;
+  timeframeIndex: number;
+  installed: boolean;
+  note: string;
+}
+
+function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewState) {
+  const clock = new Date(ctx.now).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const freshestMillis = analytics.snapshot.usage
     .map((u) => Date.parse(u.observedAt))
     .filter((millis) => Number.isFinite(millis))
     .reduce((max, millis) => Math.max(max, millis), 0);
-  const refreshed = freshestMillis === 0 ? "—" : `${relativeAge(freshestMillis, now)} ago`;
+  const refreshed = freshestMillis === 0 ? "—" : `${relativeAge(freshestMillis, ctx.now)} ago`;
+  const timeframe = TIMEFRAMES[state.timeframeIndex] ?? fallbackTimeframe;
   const footer =
-    tab === "overview"
-      ? "↑↓ select · ⏎ switch · a auto-rotate · ←→ tabs · r refresh"
-      : "←→ tabs · r refresh";
+    state.tab === "accounts"
+      ? "↑↓ select · space details · ⏎ switch · a auto-rotate · ←→ tabs · r refresh"
+      : "↑↓ scope · 1-5 range · ←→ tabs · r refresh";
+  // Assemble children explicitly, skipping empty nodes: an empty Text still
+  // consumes a gap row, and at 24 lines those phantom rows push a panel border
+  // onto its last account.
+  const header = Box(
+    { flexDirection: "row" },
+    Text({ content: "tokmax", fg: rgb(ctx.theme.accent), attributes: 1 }),
+    Text({ content: `  ${clock}`, fg: rgb(ctx.theme.dim) }),
+    Text({ content: `   ↻ ${refreshed}  ·  active 60s / idle 5m`, fg: rgb(ctx.theme.faint) }),
+    ...(state.note === "" ? [] : [Text({ content: `   ${state.note}`, fg: rgb(ctx.theme.warn) })]),
+  );
+  const children: Array<ReturnType<typeof Box> | ReturnType<typeof Text>> = [header];
+  if (!state.installed) {
+    // Nothing routes through tokmax until installed — say so, loudly but once.
+    children.push(
+      Box(
+        { width: "100%", backgroundColor: rgb(ctx.theme.warn) },
+        Text({
+          content: " native routing is off — run  tokmax install  to route codex & claude",
+          fg: rgb(ctx.theme.bg),
+          bg: rgb(ctx.theme.warn),
+          attributes: 1,
+        }),
+      ),
+    );
+  }
+  children.push(tabBar(ctx, state.tab));
+  children.push(
+    ...(state.tab === "accounts"
+      ? accountsBody(ctx, analytics.snapshot, rows, state.selected, state.expanded)
+      : analyticsBody(ctx, analytics, state.scope, timeframe)),
+  );
+  children.push(Text({ content: footer, fg: rgb(ctx.theme.dim) }));
   return Box(
     {
       flexDirection: "column",
@@ -393,32 +539,7 @@ function view(
       gap: 1,
       backgroundColor: rgb(ctx.theme.bg),
     },
-    Box(
-      { flexDirection: "row" },
-      Text({ content: "tokmax", fg: rgb(ctx.theme.accent), attributes: 1 }),
-      Text({ content: `  ${clock}`, fg: rgb(ctx.theme.dim) }),
-      Text({
-        content: `   ↻ refreshed ${refreshed}  ·  active 60s / idle 5m`,
-        fg: rgb(ctx.theme.faint),
-      }),
-      note === ""
-        ? Text({ content: "" })
-        : Text({ content: `   ${note}`, fg: rgb(ctx.theme.warn) }),
-    ),
-    // Nothing routes through tokmax until installed — say so, loudly but once.
-    installed
-      ? Text({ content: "" })
-      : Text({
-          content: " native routing is off — run  tokmax install  to route codex & claude",
-          fg: rgb(ctx.theme.bg),
-          bg: rgb(ctx.theme.warn),
-          attributes: 1,
-        }),
-    tabBar(ctx, tab),
-    ...(tab === "overview"
-      ? overviewBody(ctx, analytics.snapshot, rows, selected)
-      : analyticsBody(ctx, analytics)),
-    Text({ content: footer, fg: rgb(ctx.theme.dim) }),
+    ...children,
   );
 }
 
@@ -427,40 +548,35 @@ export async function runTuiDashboard(
   options: { installed: boolean },
 ): Promise<void> {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
-  // Follow the terminal's own background (OpenTUI queries it), which is the
-  // real signal — not the OS appearance, which can differ from the terminal.
   await renderer.waitForThemeMode(400).catch(() => null);
   const envFallback: ThemeName = detectThemeName(process.env);
   const currentTheme = (): Theme => themes[renderer.themeMode ?? envFallback];
   let analytics = await readAnalytics(socketPath);
   let rows = orderedRows(analytics.snapshot);
-  let selected = 0;
-  let tab: Tab = "overview";
-  let note = "";
+  const state: ViewState = {
+    tab: "accounts",
+    selected: 0,
+    expanded: false,
+    scope: "both",
+    timeframeIndex: 2,
+    installed: options.installed,
+    note: "",
+  };
   let busy = false;
 
   const clampSelection = () => {
-    selected = rows.length === 0 ? 0 : Math.max(0, Math.min(selected, rows.length - 1));
+    state.selected = rows.length === 0 ? 0 : Math.max(0, Math.min(state.selected, rows.length - 1));
   };
 
   // Build the next frame fully before swapping it in, so a render error can
-  // never leave the cleared root blank (the white-screen failure mode). Old
-  // subtrees are destroyed, not just removed: OpenTUI's remove() only detaches,
-  // so without destroy the native renderables leak every frame until the
-  // renderer runs out of memory and the screen goes blank after some minutes.
+  // never leave the cleared root blank. Old subtrees are destroyed, not just
+  // removed: OpenTUI's remove() only detaches, so without destroy the native
+  // renderables leak every frame until the screen goes blank.
   const paint = () => {
     clampSelection();
     let next: ReturnType<typeof Box>;
     try {
-      next = view(
-        { theme: currentTheme() },
-        analytics,
-        rows,
-        selected,
-        tab,
-        options.installed,
-        note,
-      );
+      next = view({ theme: currentTheme(), now: Date.now() }, analytics, rows, state);
     } catch {
       return;
     }
@@ -476,13 +592,13 @@ export async function runTuiDashboard(
       return;
     }
     busy = true;
-    note = message;
+    state.note = message;
     paint();
     try {
       await work();
-      note = "";
+      state.note = "";
     } catch (error) {
-      note = error instanceof Error ? error.message : "failed";
+      state.note = error instanceof Error ? error.message : "failed";
     } finally {
       busy = false;
       paint();
@@ -500,7 +616,7 @@ export async function runTuiDashboard(
     });
 
   const switchToSelected = () => {
-    const row = rows[selected];
+    const row = rows[state.selected];
     if (row === undefined) {
       return;
     }
@@ -512,18 +628,18 @@ export async function runTuiDashboard(
       // it rather than on whatever now occupies the old row index.
       const moved = rows.findIndex((r) => r.accountId === row.accountId);
       if (moved >= 0) {
-        selected = moved;
+        state.selected = moved;
       }
     });
   };
 
   const toggleAuto = () => {
-    const row = rows[selected];
+    const row = rows[state.selected];
     if (row === undefined) {
       return;
     }
-    const state = analytics.snapshot.providers.find((s) => s.provider === row.provider);
-    const enable = !(state?.policy.enabled ?? false);
+    const providerState = analytics.snapshot.providers.find((s) => s.provider === row.provider);
+    const enable = !(providerState?.policy.enabled ?? false);
     void withBusy(
       `auto-rotate ${providerCli[row.provider]} ${enable ? "on" : "off"}…`,
       async () => {
@@ -536,6 +652,13 @@ export async function runTuiDashboard(
         analytics = await readAnalytics(socketPath);
       },
     );
+  };
+
+  const cycleScope = (delta: number) => {
+    const index = scopeOrder.indexOf(state.scope);
+    const next = (index + delta + scopeOrder.length) % scopeOrder.length;
+    state.scope = scopeOrder[next] ?? "both";
+    paint();
   };
 
   await new Promise<void>((resolve) => {
@@ -560,18 +683,32 @@ export async function runTuiDashboard(
         if (key.name === "q" || (key.ctrl && key.name === "c")) {
           finish();
         } else if (key.name === "left" || key.name === "right") {
-          tab = tab === "overview" ? "analytics" : "overview";
+          state.tab = state.tab === "accounts" ? "analytics" : "accounts";
           paint();
         } else if (key.name === "up" || key.name === "k") {
-          selected = Math.max(0, selected - 1);
-          paint();
+          if (state.tab === "analytics") {
+            cycleScope(-1);
+          } else {
+            state.selected = Math.max(0, state.selected - 1);
+            paint();
+          }
         } else if (key.name === "down" || key.name === "j") {
-          selected = Math.max(0, Math.min(rows.length - 1, selected + 1));
+          if (state.tab === "analytics") {
+            cycleScope(1);
+          } else {
+            state.selected = Math.max(0, Math.min(rows.length - 1, state.selected + 1));
+            paint();
+          }
+        } else if (key.name === "space" && state.tab === "accounts") {
+          state.expanded = !state.expanded;
           paint();
-        } else if (key.name === "return" && tab === "overview") {
+        } else if (key.name === "return" && state.tab === "accounts") {
           switchToSelected();
-        } else if (key.name === "a" && tab === "overview") {
+        } else if (key.name === "a" && state.tab === "accounts") {
           toggleAuto();
+        } else if (/^[1-5]$/.test(key.name) && state.tab === "analytics") {
+          state.timeframeIndex = Number(key.name) - 1;
+          paint();
         } else if (key.name === "r") {
           void reload(true);
         }

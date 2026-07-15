@@ -73,6 +73,7 @@ export class OpenAiProviderAdapter implements ProviderAdapter {
         ...openAiAccount,
         externalAccountId: identity.accountId,
         externalUserId: identity.userId,
+        plan: identity.plan ?? openAiAccount.plan ?? null,
         label: email.success ? email.data : openAiAccount.label,
         identity: email.success ? email.data : openAiAccount.identity,
         health: "ready",

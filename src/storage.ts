@@ -22,7 +22,10 @@ import { ApplicationError } from "./errors.ts";
 
 type PersistedSchema<Type> = { parse(value: unknown): Type };
 
-const maxHistoryPoints = 120;
+// Enough spine for the multi-day analytics timeframes. At the active-account
+// probe cadence (60s) this is ~48h; idle accounts (5m) stretch further. Longer
+// timeframes fill in over time and carry the last reading forward across gaps.
+const maxHistoryPoints = 2880;
 
 export interface StateStore {
   close(): void;

@@ -139,6 +139,189 @@ export function areaChart(
   return rows;
 }
 
+export interface Timeframe {
+  key: string;
+  label: string;
+  ms: number;
+}
+
+// The analytics x-axis spans; the chart re-buckets the same history per choice.
+export const TIMEFRAMES: readonly Timeframe[] = [
+  { key: "1h", label: "1h", ms: 3_600_000 },
+  { key: "5h", label: "5h", ms: 5 * 3_600_000 },
+  { key: "24h", label: "24h", ms: 24 * 3_600_000 },
+  { key: "7d", label: "7d", ms: 7 * 24 * 3_600_000 },
+  { key: "31d", label: "31d", ms: 31 * 24 * 3_600_000 },
+];
+
+// Resample a time series onto `columns` evenly-spaced buckets over the window
+// [nowMillis - spanMillis, nowMillis]. Empty buckets carry the last known
+// reading forward so the line stays continuous even when probes are sparse;
+// columns before the first-ever sample stay null (nothing to draw yet).
+export function bucketSeries(
+  points: readonly UsageHistoryPoint[],
+  spanMillis: number,
+  nowMillis: number,
+  columns: number,
+): (number | null)[] {
+  const start = nowMillis - spanMillis;
+  const result: (number | null)[] = new Array(columns).fill(null);
+  // Points are appended in observation order, so the last write per bucket wins.
+  for (const point of points) {
+    if (point.at < start || point.at > nowMillis) {
+      continue;
+    }
+    const index = Math.min(
+      columns - 1,
+      Math.max(0, Math.floor(((point.at - start) / spanMillis) * columns)),
+    );
+    result[index] = clamp(point.usedPercent);
+  }
+  // Seed carry-forward from the most recent sample before the window opens.
+  let carry: number | null = null;
+  for (const point of points) {
+    if (point.at < start) {
+      carry = clamp(point.usedPercent);
+    } else {
+      break;
+    }
+  }
+  for (let column = 0; column < columns; column += 1) {
+    const value = result[column];
+    if (value === null || value === undefined) {
+      result[column] = carry;
+    } else {
+      carry = value;
+    }
+  }
+  return result;
+}
+
+// Collapse several windows' histories into one "pressure" series: the max
+// utilization across the given windows at each shared observation timestamp.
+export function mergedPressureSeries(
+  windows: readonly { points: readonly UsageHistoryPoint[] }[],
+): UsageHistoryPoint[] {
+  const byAt = new Map<number, number>();
+  for (const window of windows) {
+    for (const point of window.points) {
+      byAt.set(point.at, Math.max(byAt.get(point.at) ?? 0, clamp(point.usedPercent)));
+    }
+  }
+  return [...byAt.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([at, usedPercent]) => ({ at, usedPercent }));
+}
+
+const brailleDots: readonly [number, number, number, number][] = [
+  [0x01, 0x02, 0x04, 0x40], // left column, rows top→bottom
+  [0x08, 0x10, 0x20, 0x80], // right column
+];
+
+// A connected line chart drawn with braille cells (2× horizontal, 4× vertical
+// resolution per character). `columns` holds one value (0..100) or null per
+// braille sub-column — pass width*2 of them. Adjacent points are joined with a
+// vertical run so the trace reads as a continuous line. Returned top row first.
+export function brailleLine(
+  columns: readonly (number | null)[],
+  width: number,
+  height: number,
+): string[] {
+  const dotRows = height * 4;
+  const dotCols = width * 2;
+  const grid: boolean[][] = Array.from({ length: dotCols }, () => new Array(dotRows).fill(false));
+  const toY = (value: number): number =>
+    Math.max(0, Math.min(dotRows - 1, Math.round((clamp(value) / 100) * (dotRows - 1))));
+  let previousY = -1;
+  for (let x = 0; x < dotCols; x += 1) {
+    const value = columns[x];
+    if (value === null || value === undefined) {
+      previousY = -1;
+      continue;
+    }
+    const y = toY(value);
+    const column = grid[x];
+    if (column === undefined) {
+      continue;
+    }
+    if (previousY >= 0) {
+      for (let fill = Math.min(previousY, y); fill <= Math.max(previousY, y); fill += 1) {
+        column[fill] = true;
+      }
+    } else {
+      column[y] = true;
+    }
+    previousY = y;
+  }
+  const rows: string[] = [];
+  for (let charRow = 0; charRow < height; charRow += 1) {
+    const topDotY = dotRows - 1 - charRow * 4;
+    let line = "";
+    for (let charColumn = 0; charColumn < width; charColumn += 1) {
+      let bits = 0;
+      for (let subColumn = 0; subColumn < 2; subColumn += 1) {
+        const gx = charColumn * 2 + subColumn;
+        for (let subRow = 0; subRow < 4; subRow += 1) {
+          const gy = topDotY - subRow;
+          if (gy >= 0 && grid[gx]?.[gy]) {
+            bits |= brailleDots[subColumn]?.[subRow] ?? 0;
+          }
+        }
+      }
+      line += bits === 0 ? " " : String.fromCharCode(0x2800 + bits);
+    }
+    rows.push(line);
+  }
+  return rows;
+}
+
+// A compact "resets in 2h 14m" countdown; null when the window has no reset.
+export function resetCountdown(resetAtIso: string | null, nowMillis: number): string | null {
+  if (resetAtIso === null) {
+    return null;
+  }
+  const resetMillis = Date.parse(resetAtIso);
+  if (!Number.isFinite(resetMillis)) {
+    return null;
+  }
+  const remaining = resetMillis - nowMillis;
+  if (remaining <= 0) {
+    return "now";
+  }
+  const minutes = Math.round(remaining / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  if (hours < 24) {
+    return remainderMinutes === 0 ? `${hours}h` : `${hours}h ${remainderMinutes}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const remainderHours = hours % 24;
+  return remainderHours === 0 ? `${days}d` : `${days}d ${remainderHours}h`;
+}
+
+// Prettify a raw provider plan string: "pro" → "Pro", "claude_max_20x" → "Max 20×".
+export function planLabel(plan: string | null | undefined): string | null {
+  if (plan === null || plan === undefined) {
+    return null;
+  }
+  const raw = plan.trim().toLowerCase();
+  if (raw.length === 0) {
+    return null;
+  }
+  const multiplier = raw.match(/(\d+)\s*x/);
+  if (raw.includes("max")) {
+    return multiplier ? `Max ${multiplier[1]}×` : "Max";
+  }
+  return raw
+    .split(/[\s_-]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+    .join(" ");
+}
+
 export function relativeAge(observedAtMillis: number, nowMillis: number): string {
   const seconds = Math.max(0, Math.round((nowMillis - observedAtMillis) / 1000));
   if (!Number.isFinite(seconds)) {

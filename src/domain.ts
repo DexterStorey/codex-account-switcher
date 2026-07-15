@@ -24,6 +24,9 @@ const AccountFieldsSchema = z.object({
   label: AccountEmailSchema,
   identity: AccountEmailSchema,
   externalAccountId: z.string().trim().min(1).nullable(),
+  // Subscription tier as reported by the provider (codex plan_type / claude
+  // subscription tier). Optional: older stored accounts predate it.
+  plan: z.string().trim().min(1).nullish(),
   health: HealthStateSchema,
   enabled: z.boolean(),
   createdAt: z.iso.datetime(),

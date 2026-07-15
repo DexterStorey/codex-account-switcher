@@ -39,6 +39,7 @@ const JwtClaimsSchema = z
       .object({
         chatgpt_account_id: z.string().optional(),
         chatgpt_user_id: z.string().optional(),
+        chatgpt_plan_type: z.string().optional(),
         user_id: z.string().optional(),
       })
       .passthrough()
@@ -58,6 +59,7 @@ export interface CodexIdentity {
   accountId: string;
   userId: string | null;
   email: string | null;
+  plan: string | null;
   accessExpiresAt: string | null;
 }
 
@@ -119,6 +121,7 @@ export function codexIdentity(auth: CodexAuth): CodexIdentity {
       claims.sub ??
       null,
     email: claims.email ?? accessClaims.email ?? null,
+    plan: namespaced?.chatgpt_plan_type ?? null,
     accessExpiresAt: expiresAt,
   };
 }
@@ -177,6 +180,7 @@ export async function registerCodexAccount(input: {
       identity: email.data,
       externalAccountId: identity.accountId,
       externalUserId: identity.userId,
+      plan: identity.plan,
       secretReference,
       profilePath: null,
       health: "ready",

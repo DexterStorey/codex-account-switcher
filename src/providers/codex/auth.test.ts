@@ -30,8 +30,27 @@ describe("Codex auth", () => {
       accountId: "account-1",
       userId: "user-preferred",
       email: "person@example.com",
+      plan: null,
       accessExpiresAt: new Date(2_000_000_000 * 1000).toISOString(),
     });
+  });
+
+  test("reads the subscription plan from the namespaced auth claim", () => {
+    const auth = {
+      auth_mode: "chatgpt" as const,
+      tokens: {
+        id_token: token({
+          email: "person@example.com",
+          "https://api.openai.com/auth": {
+            chatgpt_account_id: "account-1",
+            chatgpt_plan_type: "pro",
+          },
+        }),
+        access_token: token({ exp: 2_000_000_000 }),
+        refresh_token: "refresh",
+      },
+    };
+    expect(codexIdentity(auth).plan).toBe("pro");
   });
 
   test("rejects malformed JWTs at the boundary", () => {

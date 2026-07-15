@@ -20,6 +20,20 @@ export const ClaudeOauthSchema = z
   .passthrough();
 export type ClaudeOauth = z.infer<typeof ClaudeOauthSchema>;
 
+// The subscription tier for display. Prefer the rate-limit tier when it carries
+// a multiplier (e.g. max_20x); otherwise the coarse subscription type.
+export function claudePlanTier(credential: {
+  subscriptionType?: string;
+  rateLimitTier?: string;
+}): string | null {
+  const tier = credential.rateLimitTier?.trim();
+  if (tier !== undefined && tier.length > 0 && /\d+x|max|pro|team|enterprise/i.test(tier)) {
+    return tier;
+  }
+  const subscription = credential.subscriptionType?.trim();
+  return subscription !== undefined && subscription.length > 0 ? subscription : null;
+}
+
 export const ClaudeCredentialPayloadSchema = z
   .object({ claudeAiOauth: ClaudeOauthSchema })
   .passthrough();
@@ -271,6 +285,7 @@ export async function registerClaudeAccount(input: {
       identity: email.data,
       externalAccountId: profile.accountId,
       externalUserId: null,
+      plan: claudePlanTier(credential),
       secretReference: null,
       profilePath,
       health: credential.expiresAt <= Date.now() ? "refreshDue" : "ready",
