@@ -3,9 +3,6 @@ import { z } from "zod";
 export const ProviderIdSchema = z.enum(["openai", "anthropic"]);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
-export const RuntimeClientSchema = z.enum(["codex", "claude", "pi"]);
-export type RuntimeClient = z.infer<typeof RuntimeClientSchema>;
-
 export const AccountEmailSchema = z.string().trim().toLowerCase().email();
 
 export const HealthStateSchema = z.enum([
@@ -153,33 +150,26 @@ export const SwitchRecordSchema = z
   .strict();
 export type SwitchRecord = z.infer<typeof SwitchRecordSchema>;
 
-export const RuntimeSessionSchema = z
+// One measured point of a usage window over time, for the dashboard sparkline.
+export const UsageHistoryPointSchema = z
+  .object({ at: z.number().int().nonnegative(), usedPercent: z.number().min(0).max(100) })
+  .strict();
+export type UsageHistoryPoint = z.infer<typeof UsageHistoryPointSchema>;
+
+export const UsageHistorySchema = z
   .object({
-    id: z.uuid(),
-    client: RuntimeClientSchema,
-    provider: ProviderIdSchema.nullable(),
-    processId: z.number().int().positive(),
-    state: z.enum(["starting", "idle", "working", "draining", "stopped"]),
-    generation: z.number().int().nonnegative(),
-    startedAt: z.iso.datetime(),
-    updatedAt: z.iso.datetime(),
+    windowId: z.string().min(1),
+    label: z.string().min(1),
+    points: z.array(UsageHistoryPointSchema),
   })
-  .strict()
-  .refine(
-    (session) =>
-      (session.client === "codex" && session.provider === "openai") ||
-      (session.client === "claude" && session.provider === "anthropic") ||
-      session.client === "pi",
-    { message: "Runtime client and provider do not match", path: ["provider"] },
-  );
-export type RuntimeSession = z.infer<typeof RuntimeSessionSchema>;
+  .strict();
+export type UsageHistory = z.infer<typeof UsageHistorySchema>;
 
 export const DashboardSnapshotSchema = z
   .object({
     accounts: z.array(AccountSchema),
     usage: z.array(UsageSnapshotSchema),
     providers: z.array(ProviderStateSchema),
-    sessions: z.array(RuntimeSessionSchema),
     sampledAt: z.iso.datetime(),
   })
   .strict();

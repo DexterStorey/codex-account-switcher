@@ -86,7 +86,6 @@ describe("dashboard", () => {
           },
         },
       ],
-      sessions: [],
       sampledAt,
     });
 

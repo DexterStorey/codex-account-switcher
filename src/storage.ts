@@ -11,16 +11,18 @@ import {
   ProviderIdSchema,
   type ProviderState,
   ProviderStateSchema,
-  type RuntimeSession,
-  RuntimeSessionSchema,
   type SwitchRecord,
   SwitchRecordSchema,
+  type UsageHistory,
+  UsageHistoryPointSchema,
   type UsageSnapshot,
   UsageSnapshotSchema,
 } from "./domain.ts";
 import { ApplicationError } from "./errors.ts";
 
 type PersistedSchema<Type> = { parse(value: unknown): Type };
+
+const maxHistoryPoints = 60;
 
 export interface StateStore {
   close(): void;
@@ -38,9 +40,7 @@ export interface StateStore {
   listSwitchRecords(limit?: number): SwitchRecord[];
   saveSwitchRecord(record: SwitchRecord): void;
   commitSwitch(record: SwitchRecord, state: ProviderState): void;
-  listRuntimeSessions(): RuntimeSession[];
-  saveRuntimeSession(session: RuntimeSession): void;
-  removeRuntimeSession(sessionId: string): void;
+  usageHistory(accountId: string): UsageHistory[];
   dashboard(): DashboardSnapshot;
 }
 
@@ -135,11 +135,15 @@ function migrate(database: Database): void {
     CREATE INDEX IF NOT EXISTS switch_records_provider_created
       ON switch_records(provider, created_at DESC);
 
-    CREATE TABLE IF NOT EXISTS runtime_sessions (
-      id TEXT PRIMARY KEY,
-      updated_at TEXT NOT NULL,
-      payload TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS usage_history (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      window_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      points TEXT NOT NULL,
+      PRIMARY KEY (account_id, window_id)
     );
+
+    DROP TABLE IF EXISTS runtime_sessions;
   `);
 
   const accountColumns = new Set(
@@ -331,11 +335,45 @@ export function createStateStore(databasePath: string): StateStore {
         `Usage provider ${parsed.provider} does not match account provider ${account.provider}`,
       );
     }
+    const observedAtMillis = Date.parse(parsed.observedAt);
+    const record = database.transaction(() => {
+      database
+        .query(
+          "INSERT INTO usage_snapshots(account_id, observed_at, payload) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at, payload = excluded.payload",
+        )
+        .run(parsed.accountId, parsed.observedAt, serialize(parsed));
+      for (const window of parsed.windows) {
+        appendUsagePoint(parsed.accountId, window.id, window.label, {
+          at: observedAtMillis,
+          usedPercent: Math.max(0, Math.min(100, window.usedPercent)),
+        });
+      }
+    });
+    record.immediate();
+  }
+
+  // Keeps a bounded per-window trend for the dashboard sparkline; the newest
+  // maxHistoryPoints observations are retained.
+  function appendUsagePoint(
+    accountId: string,
+    windowId: string,
+    label: string,
+    point: { at: number; usedPercent: number },
+  ): void {
+    const existing = database
+      .query<{ points: string }, [string, string]>(
+        "SELECT points FROM usage_history WHERE account_id = ? AND window_id = ?",
+      )
+      .get(accountId, windowId);
+    const points =
+      existing === null ? [] : UsageHistoryPointSchema.array().parse(JSON.parse(existing.points));
+    points.push(point);
+    const trimmed = points.slice(-maxHistoryPoints);
     database
       .query(
-        "INSERT INTO usage_snapshots(account_id, observed_at, payload) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at, payload = excluded.payload",
+        "INSERT INTO usage_history(account_id, window_id, label, points) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, window_id) DO UPDATE SET label = excluded.label, points = excluded.points",
       )
-      .run(parsed.accountId, parsed.observedAt, serialize(parsed));
+      .run(accountId, windowId, label, JSON.stringify(trimmed));
   }
 
   function listProviderStates(): ProviderState[] {
@@ -422,24 +460,17 @@ export function createStateStore(databasePath: string): StateStore {
       .immediate();
   }
 
-  function listRuntimeSessions(): RuntimeSession[] {
+  function usageHistory(accountId: string): UsageHistory[] {
     return database
-      .query<JsonRow, []>("SELECT payload FROM runtime_sessions ORDER BY id")
-      .all()
-      .map((row) => parseRequiredPayload(row, RuntimeSessionSchema));
-  }
-
-  function saveRuntimeSession(session: RuntimeSession): void {
-    const parsed = RuntimeSessionSchema.parse(session);
-    database
-      .query(
-        "INSERT INTO runtime_sessions(id, updated_at, payload) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload",
+      .query<{ window_id: string; label: string; points: string }, [string]>(
+        "SELECT window_id, label, points FROM usage_history WHERE account_id = ? ORDER BY window_id",
       )
-      .run(parsed.id, parsed.updatedAt, serialize(parsed));
-  }
-
-  function removeRuntimeSession(sessionId: string): void {
-    database.query("DELETE FROM runtime_sessions WHERE id = ?").run(sessionId);
+      .all(accountId)
+      .map((row) => ({
+        windowId: row.window_id,
+        label: row.label,
+        points: UsageHistoryPointSchema.array().parse(JSON.parse(row.points)),
+      }));
   }
 
   function dashboard(): DashboardSnapshot {
@@ -448,7 +479,6 @@ export function createStateStore(databasePath: string): StateStore {
         accounts: listAccounts(),
         usage: listUsage(),
         providers: listProviderStates(),
-        sessions: listRuntimeSessions(),
         sampledAt: new Date().toISOString(),
       }),
     )();
@@ -470,9 +500,7 @@ export function createStateStore(databasePath: string): StateStore {
     listSwitchRecords,
     saveSwitchRecord,
     commitSwitch,
-    listRuntimeSessions,
-    saveRuntimeSession,
-    removeRuntimeSession,
+    usageHistory,
     dashboard,
   };
 }
