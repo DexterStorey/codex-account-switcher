@@ -264,3 +264,55 @@ describe("Claude auth", () => {
     expect(projections).toEqual([{ profile: paths.claudeActiveProfile, token: "active-refresh" }]);
   });
 });
+
+describe("managed profile passthrough", () => {
+  test("symlinks user configuration but never credentials or OAuth metadata", async () => {
+    const {
+      mkdir: makeDirectory,
+      writeFile: write,
+      lstat,
+      readlink,
+      readFile,
+    } = await import("node:fs/promises");
+    const { mirrorUserClaudeProfile } = await import("./auth.ts");
+    const root = await mkdtemp(join(tmpdir(), "claude-mirror-test-"));
+    temporaryDirectories.push(root);
+    const user = join(root, "user-claude");
+    const active = join(root, "active");
+    await makeDirectory(join(user, "skills"), { recursive: true });
+    await makeDirectory(active, { recursive: true });
+    await write(join(user, "settings.json"), '{"theme":"dark"}');
+    await write(join(user, "CLAUDE.md"), "my memory");
+    await write(join(user, ".credentials.json"), '{"claudeAiOauth":{}}');
+    await write(
+      join(user, ".claude.json"),
+      JSON.stringify({
+        theme: "dark",
+        oauthAccount: { emailAddress: "user@example.com" },
+        projects: { "/repo-a": { trusted: true } },
+      }),
+    );
+    await write(
+      join(active, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: { emailAddress: "switched@example.com" },
+        projects: { "/repo-b": { trusted: true } },
+      }),
+    );
+    await mirrorUserClaudeProfile(active, user);
+    expect((await lstat(join(active, "settings.json"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(active, "settings.json"))).toBe(join(user, "settings.json"));
+    expect((await lstat(join(active, "skills"))).isSymbolicLink()).toBe(true);
+    // Credentials must never follow the user profile into the managed one.
+    await expect(lstat(join(active, ".credentials.json"))).rejects.toThrow();
+    const merged = JSON.parse(await readFile(join(active, ".claude.json"), "utf8"));
+    expect(merged.theme).toBe("dark");
+    // The managed profile keeps its own switched identity metadata...
+    expect(merged.oauthAccount.emailAddress).toBe("switched@example.com");
+    // ...and trust granted in either profile survives.
+    expect(Object.keys(merged.projects).sort()).toEqual(["/repo-a", "/repo-b"]);
+    // Idempotent on a second run.
+    await mirrorUserClaudeProfile(active, user);
+    expect(await readlink(join(active, "settings.json"))).toBe(join(user, "settings.json"));
+  });
+});

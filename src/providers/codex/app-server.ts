@@ -142,11 +142,13 @@ export class CodexAppServerClient {
     try {
       await client.request("initialize", {
         clientInfo: {
-          name: "codex-account-switcher",
-          title: "Codex Account Switcher",
-          version: "0.2.0",
+          name: "tokmax",
+          title: "tokmax",
+          version: "0.3.0",
         },
-        capabilities: null,
+        // account/login/start with chatgptAuthTokens is gated behind this
+        // capability declaration in codex 0.144.x.
+        capabilities: { experimentalApi: true },
       });
       client.notify("initialized");
       return client;

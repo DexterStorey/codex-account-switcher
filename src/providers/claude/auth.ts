@@ -1,9 +1,19 @@
-import { mkdir, open, readFile, rm, stat } from "node:fs/promises";
-import { userInfo } from "node:os";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, userInfo } from "node:os";
 import { join, normalize, resolve } from "node:path";
 import { z } from "zod";
 import { type Account, AccountEmailSchema } from "../../domain.ts";
-import { ApplicationError } from "../../errors.ts";
+import { ApplicationError, errorMessage } from "../../errors.ts";
 import type { FetchImplementation } from "../../http.ts";
 import type { ApplicationPaths } from "../../paths.ts";
 
@@ -400,6 +410,99 @@ export async function activateClaudeAccount(input: {
   });
 }
 
+// Everything a user would miss from their own installation follows them into
+// the managed profile; credentials and OAuth metadata never do.
+const userConfigPassthrough = [
+  "settings.json",
+  "keybindings.json",
+  "CLAUDE.md",
+  "skills",
+  "agents",
+  "commands",
+  "plugins",
+  "output-styles",
+  "projects",
+  "todos",
+  "history.jsonl",
+  "file-history",
+  "shell-snapshots",
+  "session-env",
+] as const;
+
+// The isolated CLAUDE_CONFIG_DIR keeps each account's credential separate, but
+// without the user's own configuration every managed session behaves like a
+// factory-fresh install. Symlink configuration through and merge the state
+// file, leaving the per-profile credential material isolated.
+export async function mirrorUserClaudeProfile(
+  activeProfilePath: string,
+  userProfilePath = join(homedir(), ".claude"),
+): Promise<void> {
+  const active = canonicalClaudeProfilePath(activeProfilePath);
+  const user = canonicalClaudeProfilePath(userProfilePath);
+  if (active === user) {
+    return;
+  }
+  for (const entry of userConfigPassthrough) {
+    const source = join(user, entry);
+    const target = join(active, entry);
+    const sourceExists = await stat(source).then(
+      () => true,
+      () => false,
+    );
+    const existing = await lstat(target).catch(() => null);
+    if (existing !== null && !existing.isSymbolicLink()) {
+      continue;
+    }
+    if (existing !== null) {
+      if (!sourceExists || (await readlink(target).catch(() => null)) !== source) {
+        await rm(target, { force: true });
+      } else {
+        continue;
+      }
+    }
+    if (sourceExists) {
+      await symlink(source, target);
+    }
+  }
+  // .claude.json carries global state (MCP servers, project trust, onboarding)
+  // but also this profile's OAuth account metadata, so it is merged rather
+  // than linked: the user's file is the base, the active profile keeps its
+  // own identity metadata, and project trust granted in either place stays.
+  const userState = await readJsonObject(join(user, ".claude.json"));
+  if (userState !== null) {
+    const activeStatePath = join(active, ".claude.json");
+    const activeState = (await readJsonObject(activeStatePath)) ?? {};
+    const merged: Record<string, unknown> = { ...userState, ...pick(activeState, "oauthAccount") };
+    const userProjects = asObject(userState.projects);
+    const activeProjects = asObject(activeState.projects);
+    if (userProjects !== null || activeProjects !== null) {
+      merged.projects = { ...(userProjects ?? {}), ...(activeProjects ?? {}) };
+    }
+    await writeFile(activeStatePath, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+  }
+}
+
+function pick(
+  source: Record<string, unknown>,
+  ...keys: readonly string[]
+): Record<string, unknown> {
+  return Object.fromEntries(keys.filter((key) => key in source).map((key) => [key, source[key]]));
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    return asObject(JSON.parse(await readFile(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
 export async function runManagedClaude(
   paths: ApplicationPaths,
   arguments_: readonly string[],
@@ -457,20 +560,22 @@ export async function runManagedClaude(
   } finally {
     await settingsFile.close();
   }
+  await mirrorUserClaudeProfile(paths.claudeActiveProfile).catch((error) => {
+    process.stderr.write(
+      `warning: could not mirror ~/.claude configuration into the managed profile: ${errorMessage(error)}\n`,
+    );
+  });
   try {
-    return await Bun.spawn(
-      ["claude", "--settings", settingsPath, "--setting-sources", "user", ...arguments_],
-      {
-        env: {
-          ...process.env,
-          CLAUDE_CONFIG_DIR: paths.claudeActiveProfile,
-          TOKMAX_RUNTIME_PID: String(process.pid),
-        },
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
+    return await Bun.spawn(["claude", "--settings", settingsPath, ...arguments_], {
+      env: {
+        ...process.env,
+        CLAUDE_CONFIG_DIR: paths.claudeActiveProfile,
+        TOKMAX_RUNTIME_PID: String(process.pid),
       },
-    ).exited;
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    }).exited;
   } finally {
     await rm(settingsPath, { force: true });
   }

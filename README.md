@@ -107,6 +107,15 @@ tokmax claude
 tokmax pi --model openai-codex/gpt-5.4
 ```
 
+Launching a managed client with no active account selects one automatically —
+healthy accounts first, lowest usage pressure wins — and prints the choice.
+Managed Claude sessions inherit your own `~/.claude` configuration (settings,
+skills, agents, memory, project history) through symlinks in the managed
+profile; credentials and OAuth identity metadata never cross profiles. A
+switch drains managed sessions for up to 60 seconds and refuses rather than
+interrupting a running turn; if the manager daemon is unreachable, managed
+sessions keep working without the switch boundary instead of blocking prompts.
+
 Switching is transactional:
 
 1. Refresh and validate the target credential.

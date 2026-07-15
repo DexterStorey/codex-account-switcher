@@ -249,7 +249,7 @@ export async function managerRequest<Result>(input: {
     const timeout = setTimeout(() => {
       socket.destroy();
       reject(new ApplicationError("MANAGER_TIMEOUT", `${input.method} timed out`));
-    }, input.timeoutMilliseconds ?? 180_000);
+    }, input.timeoutMilliseconds ?? 15_000);
     socket.setEncoding("utf8");
     socket.once("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: input.method, params: input.params })}\n`);
@@ -292,7 +292,12 @@ export async function managerAvailable(socketPath: string): Promise<boolean> {
 }
 
 export function readDashboard(socketPath: string): Promise<DashboardSnapshot> {
-  return managerRequest({ socketPath, method: "dashboard/read", schema: DashboardSnapshotSchema });
+  return managerRequest({
+    socketPath,
+    method: "dashboard/read",
+    schema: DashboardSnapshotSchema,
+    timeoutMilliseconds: 15_000,
+  });
 }
 
 export function refreshUsage(socketPath: string): Promise<DashboardSnapshot> {
@@ -300,6 +305,7 @@ export function refreshUsage(socketPath: string): Promise<DashboardSnapshot> {
     socketPath,
     method: "usage/refresh",
     schema: DashboardSnapshotSchema,
+    timeoutMilliseconds: 60_000,
   });
 }
 
@@ -313,5 +319,8 @@ export function requestSwitch(
     method: "provider/switch",
     params: { provider, targetAccountId, reason: "manual" },
     schema: DashboardSnapshotSchema,
+    // A switch legitimately waits for managed sessions to drain (60s budget)
+    // plus credential refresh and verification round-trips.
+    timeoutMilliseconds: 120_000,
   });
 }

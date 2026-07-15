@@ -165,14 +165,27 @@ export class AccountManager {
       clearInterval(this.#monitor);
       this.#monitor = null;
     }
-    await this.#refreshOperation?.catch(() => undefined);
+    // Shutdown must terminate even when a refresh or an adapter is wedged on
+    // a child process; a hung stop holds the startup lock and strands every
+    // managed session on a dead socket.
+    const bounded = (work: Promise<unknown> | undefined, milliseconds: number) =>
+      work === undefined ? Promise.resolve() : Promise.race([work, Bun.sleep(milliseconds)]);
+    await bounded(
+      this.#refreshOperation?.catch(() => undefined),
+      15_000,
+    );
     for (const release of this.#providerBarrierReleases.values()) {
       release();
     }
     this.#providerBarriers.clear();
     this.#providerBarrierReleases.clear();
     await Promise.all(
-      Object.values(this.#adapters).map((adapter) => adapter.stop().catch(() => undefined)),
+      Object.values(this.#adapters).map((adapter) =>
+        bounded(
+          adapter.stop().catch(() => undefined),
+          10_000,
+        ),
+      ),
     );
   }
 

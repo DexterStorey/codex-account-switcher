@@ -24,6 +24,7 @@ import {
 import { registerCodexAccount } from "./providers/codex/auth.ts";
 import { createMacOsKeychainVault } from "./providers/codex/keychain.ts";
 import { runManagedCodex } from "./providers/codex/supervisor.ts";
+import { pickDefaultAccount } from "./selection.ts";
 import { createStateStore, type StateStore } from "./storage.ts";
 import { renderDashboard, runDashboard } from "./ui.ts";
 
@@ -221,6 +222,41 @@ async function ensureDaemon(context: ApplicationContext): Promise<void> {
   if (!(await managerAvailable(context.paths.managerSocket))) {
     await startDaemon(context);
   }
+}
+
+// A managed client launched with no active account would reach the provider's
+// own sign-in screen, whose login flow the managed boundary rejects. Select an
+// account first and say so.
+async function ensureActiveProviderAccount(
+  context: ApplicationContext,
+  provider: "openai" | "anthropic",
+  clientName: string,
+): Promise<void> {
+  await ensureDaemon(context);
+  const snapshot = await readDashboard(context.paths.managerSocket);
+  const state = snapshot.providers.find((candidate) => candidate.provider === provider);
+  if (state === undefined || state.activeAccountId !== null) {
+    return;
+  }
+  const loginName = provider === "openai" ? "codex" : "claude";
+  const accounts = snapshot.accounts.filter((account) => account.provider === provider);
+  if (accounts.length === 0) {
+    throw new ApplicationError(
+      "NO_ACCOUNTS",
+      `No ${loginName} account is registered yet. Run: tokmax ${loginName} login`,
+    );
+  }
+  const target = pickDefaultAccount({ accounts, usage: snapshot.usage });
+  if (target === null) {
+    throw new ApplicationError(
+      "NO_ACCOUNTS",
+      `No enabled ${loginName} account is available; check tokmax list`,
+    );
+  }
+  await requestSwitch(context.paths.managerSocket, provider, target.id);
+  process.stdout.write(
+    `Activated ${target.label} for ${clientName}. Change with: tokmax switch ${loginName} <email>\n`,
+  );
 }
 
 async function addAccount(
@@ -496,7 +532,7 @@ async function managedPi(
   context: ApplicationContext,
   arguments_: readonly string[],
 ): Promise<number> {
-  await ensureDaemon(context);
+  await ensureActiveProviderAccount(context, "openai", "pi");
   const builtExtension = join(import.meta.dir, "extensions", "pi.js");
   const sourceExtension = join(import.meta.dir, "extensions", "pi.ts");
   const extension = (await Bun.file(builtExtension).exists()) ? builtExtension : sourceExtension;
@@ -566,8 +602,19 @@ async function runClaudeHook(
         return 0;
     }
   } catch (error) {
-    process.stderr.write(`Managed Claude boundary unavailable: ${errorMessage(error)}\n`);
-    return action === "turn-begin" ? 2 : 1;
+    // With no manager listening there is no switch in progress, so blocking
+    // the user's prompt protects nothing — it just bricks the session until
+    // the daemon returns. Only an actively unresponsive manager blocks.
+    const message = errorMessage(error);
+    const managerGone = /ENOENT|ECONNREFUSED/.test(message);
+    if (action === "turn-begin" && !managerGone) {
+      process.stderr.write(`Managed Claude boundary unavailable: ${message}\n`);
+      return 2;
+    }
+    process.stderr.write(
+      `tokmax manager unreachable (${message}); continuing without the switch boundary\n`,
+    );
+    return action === "turn-begin" ? 0 : 1;
   }
 }
 
@@ -651,6 +698,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           socketPath: context.paths.managerSocket,
           method: "usage/refresh",
           schema: z.unknown(),
+          timeoutMilliseconds: 60_000,
         });
         process.stdout.write("Usage and health refreshed.\n");
         return 0;
@@ -673,12 +721,13 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           await reauthenticateAccount(context, ["codex", ...arguments_.slice(2)]);
           return 0;
         }
-        await ensureDaemon(context);
+        await ensureActiveProviderAccount(context, "openai", "codex");
         await managerRequest({
           socketPath: context.paths.managerSocket,
           method: "provider/ensure",
           params: { provider: "openai" },
           schema: z.object({ ready: z.literal(true) }).strict(),
+          timeoutMilliseconds: 60_000,
         });
         return runManagedCodex(context.paths, arguments_.slice(1));
       case "claude":
@@ -690,7 +739,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           await reauthenticateAccount(context, ["claude", ...arguments_.slice(2)]);
           return 0;
         }
-        await ensureDaemon(context);
+        await ensureActiveProviderAccount(context, "anthropic", "claude");
         return runManagedClaude(context.paths, arguments_.slice(1));
       case "pi":
         if (arguments_[1] === "login" || arguments_[1] === "relogin") {

@@ -61,6 +61,37 @@ function eligibleHealth(account: Account): boolean {
   }
 }
 
+// When a managed client launches with no active account, the launcher selects
+// one instead of dead-ending in a runtime whose own login flow is rejected.
+// Healthy accounts come first, lowest hard-window pressure wins, accounts
+// without a reading sort after measured ones (unknown is never treated as 0%),
+// and account ID is the stable tie-breaker.
+export function pickDefaultAccount(input: {
+  accounts: readonly Account[];
+  usage: readonly UsageSnapshot[];
+}): Account | null {
+  const candidates = input.accounts.filter((account) => account.enabled);
+  const pressures = new Map(
+    input.usage.map((snapshot) => [snapshot.accountId, hardPressure(snapshot)]),
+  );
+  const ranked = [...candidates].sort((left, right) => {
+    const healthOrder = Number(!eligibleHealth(left)) - Number(!eligibleHealth(right));
+    if (healthOrder !== 0) {
+      return healthOrder;
+    }
+    const leftPressure = pressures.get(left.id) ?? null;
+    const rightPressure = pressures.get(right.id) ?? null;
+    if (leftPressure !== null && rightPressure !== null && leftPressure !== rightPressure) {
+      return leftPressure - rightPressure;
+    }
+    if ((leftPressure === null) !== (rightPressure === null)) {
+      return leftPressure === null ? 1 : -1;
+    }
+    return left.id.localeCompare(right.id);
+  });
+  return ranked[0] ?? null;
+}
+
 export function selectRotation(input: RotationInput): RotationDecision {
   const { policy } = input.state;
   if (!policy.enabled) {
