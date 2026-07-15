@@ -1,9 +1,16 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import {
+  configTargets,
+  installClaudeConfig,
+  installCodexConfig,
+  uninstallClaudeConfig,
+  uninstallCodexConfig,
+} from "./config-install.ts";
 import { acquireDaemonLock } from "./daemon-lock.ts";
 import { type Account, AccountEmailSchema } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
@@ -11,40 +18,27 @@ import {
   managerAvailable,
   managerRequest,
   readDashboard,
+  readProxyPort,
   requestSwitch,
   startManagerServer,
 } from "./ipc.ts";
 import { AccountManager } from "./manager.ts";
-import { type ApplicationPaths, applicationPaths, ensureApplicationPaths } from "./paths.ts";
-import { runCommand } from "./process.ts";
 import {
-  registerClaudeAccount,
-  removeClaudeProfile,
-  runManagedClaude,
-} from "./providers/claude/auth.ts";
+  type ApplicationPaths,
+  applicationPaths,
+  ensureApplicationPaths,
+  proxyBaseUrl,
+} from "./paths.ts";
+import { runCommand } from "./process.ts";
+import { registerClaudeAccount, removeClaudeProfile } from "./providers/claude/auth.ts";
 import { registerCodexAccount } from "./providers/codex/auth.ts";
 import { createMacOsKeychainVault } from "./providers/codex/keychain.ts";
-import { runManagedCodex } from "./providers/codex/supervisor.ts";
 import { pickDefaultAccount } from "./selection.ts";
 import { createStateStore, type StateStore } from "./storage.ts";
 import { renderDashboard, runDashboard } from "./ui.ts";
 
 const CommandSchema = z.array(z.string());
 const EmptyResultSchema = z.unknown();
-const ClaudeHookInputSchema = z
-  .object({
-    session_id: z.string().min(1),
-    hook_event_name: z.enum([
-      "SessionStart",
-      "UserPromptSubmit",
-      "Stop",
-      "StopFailure",
-      "Notification",
-      "SessionEnd",
-    ]),
-  })
-  .passthrough();
-const HookAcknowledgementSchema = z.object({ acknowledged: z.literal(true) }).strict();
 
 interface ApplicationContext {
   paths: ApplicationPaths;
@@ -88,24 +82,27 @@ Accounts
   tokmax whoami                           active account per provider
 
 Sessions
-  tokmax codex [arguments...]             launch a managed Codex TUI
-  tokmax claude [arguments...]            launch managed Claude Code
+  tokmax install                          route native codex/claude through tokmax
+  tokmax uninstall                        restore the original client config
+  tokmax codex [arguments...]             launch Codex on the active account
+  tokmax claude [arguments...]            launch Claude Code on the active account
 
 Limits
   tokmax                                  live dashboard
   tokmax status [--json]                  one-shot snapshot
   tokmax refresh                          re-probe every account now
-  tokmax switch <codex|claude> <email>    move managed sessions to an account
+  tokmax switch <codex|claude> <email>    point every request at an account
   tokmax auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]
 
 Plumbing
-  tokmax daemon <start|stop|status>       the manager that owns probes and switches
-  tokmax doctor                           verify local tools and the manager boundary
+  tokmax daemon <start|stop|status>       the manager that runs the proxy and probes
+  tokmax doctor                           verify local tools and config
 
-Logins are isolated and never change a running session. Switching only controls
-sessions launched through tokmax wrappers. Automatic rotation is off by default;
---authorized records your confirmation that your provider agreement permits it.
-Relogin requires a stopped manager so credential replacement stays atomic.`;
+A local proxy injects the active account's credential into every request, so a
+switch takes effect on the next request — even mid-turn — and the clients run
+natively. After tokmax install, plain codex and claude route through it too.
+Automatic rotation is off by default; --authorized records your confirmation
+that your provider agreement permits it.`;
 }
 
 async function createContext(): Promise<ApplicationContext> {
@@ -566,7 +563,6 @@ function whoami(context: ApplicationContext): void {
   const states = new Map(
     context.store.listProviderStates().map((state) => [state.provider, state]),
   );
-  const sessions = context.store.listRuntimeSessions();
   for (const [provider, clientName] of [
     ["openai", "codex"],
     ["anthropic", "claude"],
@@ -574,87 +570,67 @@ function whoami(context: ApplicationContext): void {
     const state = states.get(provider);
     const active =
       state?.activeAccountId == null ? null : context.store.findAccount(state.activeAccountId);
-    const liveSessions = sessions.filter((session) => session.provider === provider).length;
     process.stdout.write(
       `${clientName.padEnd(7)} ${
         active === null ? "no active account" : `${active.label} (gen ${state?.generation ?? 0})`
-      }${liveSessions === 0 ? "" : ` · ${liveSessions} managed session${liveSessions === 1 ? "" : "s"}`}\n`,
+      }\n`,
     );
   }
 }
 
-async function runClaudeHook(
+// Launch a native client. With config installed, plain `codex`/`claude` route
+// through the proxy too; the wrapper only adds account auto-selection and, for
+// safety, sets the base URL for this launch even if the user has not installed.
+async function launchNative(
   context: ApplicationContext,
+  provider: "openai" | "anthropic",
   arguments_: readonly string[],
 ): Promise<number> {
-  const action = z
-    .enum(["session-start", "turn-begin", "turn-end", "session-end"])
-    .parse(arguments_[0]);
-  const input = ClaudeHookInputSchema.parse(JSON.parse(await Bun.stdin.text()));
-  const processId = z.coerce.number().int().positive().parse(process.env.TOKMAX_RUNTIME_PID);
-  const params = { sessionId: input.session_id, processId };
-  try {
-    switch (action) {
-      case "session-start":
-        if (input.hook_event_name !== "SessionStart") {
-          throw new ApplicationError("HOOK_EVENT_MISMATCH", "Expected SessionStart hook input");
-        }
-        await managerRequest({
-          socketPath: context.paths.managerSocket,
-          method: "claude/session/start",
-          params,
-          schema: HookAcknowledgementSchema,
-        });
-        return 0;
-      case "turn-begin":
-        if (input.hook_event_name !== "UserPromptSubmit") {
-          throw new ApplicationError("HOOK_EVENT_MISMATCH", "Expected UserPromptSubmit hook input");
-        }
-        await managerRequest({
-          socketPath: context.paths.managerSocket,
-          method: "claude/turn/begin",
-          params,
-          schema: z.object({ generation: z.number().int().nonnegative() }).strict(),
-        });
-        return 0;
-      case "turn-end":
-        if (!new Set(["Stop", "StopFailure", "Notification"]).has(input.hook_event_name)) {
-          throw new ApplicationError("HOOK_EVENT_MISMATCH", "Expected a Claude turn-end hook");
-        }
-        await managerRequest({
-          socketPath: context.paths.managerSocket,
-          method: "claude/turn/end",
-          params,
-          schema: HookAcknowledgementSchema,
-        });
-        return 0;
-      case "session-end":
-        if (input.hook_event_name !== "SessionEnd") {
-          throw new ApplicationError("HOOK_EVENT_MISMATCH", "Expected SessionEnd hook input");
-        }
-        await managerRequest({
-          socketPath: context.paths.managerSocket,
-          method: "claude/session/end",
-          params,
-          schema: HookAcknowledgementSchema,
-        });
-        return 0;
-    }
-  } catch (error) {
-    // With no manager listening there is no switch in progress, so blocking
-    // the user's prompt protects nothing — it just bricks the session until
-    // the daemon returns. Only an actively unresponsive manager blocks.
-    const message = errorMessage(error);
-    const managerGone = /ENOENT|ECONNREFUSED/.test(message);
-    if (action === "turn-begin" && !managerGone) {
-      process.stderr.write(`Managed Claude boundary unavailable: ${message}\n`);
-      return 2;
-    }
-    process.stderr.write(
-      `tokmax manager unreachable (${message}); continuing without the switch boundary\n`,
-    );
-    return action === "turn-begin" ? 0 : 1;
+  await ensureActiveProviderAccount(context, provider, provider === "openai" ? "codex" : "claude");
+  const base = proxyBaseUrl(context.paths, provider);
+  if (provider === "openai") {
+    return Bun.spawn(
+      [
+        "codex",
+        "-c",
+        "model_provider=tokmax",
+        "-c",
+        `model_providers.tokmax={name="tokmax",base_url="${base}",wire_api="responses"}`,
+        ...arguments_,
+      ],
+      { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+    ).exited;
   }
+  return Bun.spawn(["claude", ...arguments_], {
+    env: {
+      ...process.env,
+      ANTHROPIC_BASE_URL: base,
+      ANTHROPIC_AUTH_TOKEN: "managed-by-tokmax",
+    },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
+}
+
+async function installConfig(context: ApplicationContext): Promise<void> {
+  // Confirms the daemon (and its proxy) can start before pointing config at it.
+  await ensureDaemon(context);
+  const codexPath = await installCodexConfig(context.paths);
+  const claudePath = await installClaudeConfig(context.paths);
+  process.stdout.write(
+    `Routed native Codex and Claude Code through tokmax:\n  ${codexPath}\n  ${claudePath}\nPlain \`codex\` and \`claude\` now use the active account. Undo with: tokmax uninstall\n`,
+  );
+}
+
+async function uninstallConfig(): Promise<void> {
+  const codexPath = await uninstallCodexConfig();
+  const claudePath = await uninstallClaudeConfig();
+  const targets = configTargets();
+  process.stdout.write(
+    `${codexPath === null ? `No tokmax block in ${targets.codex}` : `Restored ${codexPath}`}\n` +
+      `${claudePath === null ? `No tokmax env in ${targets.claude}` : `Restored ${claudePath}`}\n`,
+  );
 }
 
 async function doctor(context: ApplicationContext): Promise<void> {
@@ -674,11 +650,22 @@ async function doctor(context: ApplicationContext): Promise<void> {
     );
   }
   process.stdout.write(`${Bun.which("security") === null ? "missing" : "ok     "}  security\n`);
+  const running = await managerAvailable(context.paths.managerSocket);
+  process.stdout.write(`${running ? "running" : "stopped"}  manager daemon\n`);
+  if (running) {
+    const port = await readProxyPort(context.paths.managerSocket).catch(() => null);
+    process.stdout.write(
+      `${port === null ? "warning  " : "ok     "}  proxy    ${port === null ? "not listening" : `127.0.0.1:${port}`}\n`,
+    );
+  }
+  const targets = configTargets();
+  const installed = await readFile(targets.codex, "utf8")
+    .then((content) => content.includes("model_providers.tokmax"))
+    .catch(() => false);
   process.stdout.write(
-    `${(await managerAvailable(context.paths.managerSocket)) ? "running" : "stopped"}  manager daemon\n`,
+    `${installed ? "ok     " : "note   "}  config   ${installed ? "native Codex/Claude routed through tokmax" : "run tokmax install to route native codex/claude"}\n`,
   );
   process.stdout.write(`state     ${context.paths.database}\n`);
-  process.stdout.write("boundary  only sessions launched through tokmax are switchable\n");
   const legacyDirectories = [join(context.paths.root, "codex"), join(context.paths.root, "claude")];
   const legacyDetected = await Promise.all(
     legacyDirectories.map((directory) =>
@@ -759,15 +746,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           await reauthenticateAccount(context, ["codex", ...arguments_.slice(2)]);
           return 0;
         }
-        await ensureActiveProviderAccount(context, "openai", "codex");
-        await managerRequest({
-          socketPath: context.paths.managerSocket,
-          method: "provider/ensure",
-          params: { provider: "openai" },
-          schema: z.object({ ready: z.literal(true) }).strict(),
-          timeoutMilliseconds: 60_000,
-        });
-        return runManagedCodex(context.paths, arguments_.slice(1));
+        return launchNative(context, "openai", arguments_.slice(1));
       case "claude":
         if (arguments_[1] === "login") {
           await addAccount(context, ["claude", ...arguments_.slice(2)]);
@@ -777,19 +756,19 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           await reauthenticateAccount(context, ["claude", ...arguments_.slice(2)]);
           return 0;
         }
-        await ensureActiveProviderAccount(context, "anthropic", "claude");
-        return runManagedClaude(context.paths, arguments_.slice(1));
+        return launchNative(context, "anthropic", arguments_.slice(1));
       case "list":
         listAccounts(context);
         return 0;
       case "whoami":
         whoami(context);
         return 0;
-      case "hook":
-        if (arguments_[1] !== "claude") {
-          throw new ApplicationError("USAGE", "Usage: hook claude <action>");
-        }
-        return runClaudeHook(context, arguments_.slice(2));
+      case "install":
+        await installConfig(context);
+        return 0;
+      case "uninstall":
+        await uninstallConfig();
+        return 0;
       case "daemon":
         switch (arguments_[1]) {
           case "run":

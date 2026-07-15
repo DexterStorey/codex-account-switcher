@@ -1,41 +1,13 @@
-import { z } from "zod";
 import { type Account, AccountEmailSchema } from "../../domain.ts";
 import { ApplicationError } from "../../errors.ts";
 import type { FetchImplementation } from "../../http.ts";
-import type { ApplicationPaths } from "../../paths.ts";
 import type { ProviderAdapter, ProviderProbeResult } from "../provider.ts";
-import {
-  activateClaudeAccount,
-  activeProfileHoldsAccount,
-  defaultClaudeCredentialReader,
-  fetchClaudeProfile,
-  projectClaudeCredential,
-  refreshClaudeProfile,
-} from "./auth.ts";
+import { defaultClaudeCredentialReader, fetchClaudeProfile, refreshClaudeProfile } from "./auth.ts";
 import { fetchClaudeUsage } from "./usage.ts";
-
-const ClaudeAgentsSchema = z.union([
-  z.array(z.object({ state: z.string().optional(), status: z.string().optional() }).passthrough()),
-  z.object({
-    agents: z.array(
-      z.object({ state: z.string().optional(), status: z.string().optional() }).passthrough(),
-    ),
-  }),
-]);
-
-export function claudeAgentsIdle(value: unknown): boolean {
-  const parsed = ClaudeAgentsSchema.safeParse(value);
-  if (!parsed.success) {
-    return false;
-  }
-  const activeAgents = Array.isArray(parsed.data) ? parsed.data : parsed.data.agents;
-  return activeAgents.length === 0;
-}
 
 export interface AnthropicProviderDependencies {
   fetchImplementation: FetchImplementation;
   now(): Date;
-  activeAccount(): Account | null;
 }
 
 function scopesPermitUsage(scopes: string | string[] | undefined): boolean {
@@ -65,63 +37,31 @@ function assertIdentity(
   if (account.externalAccountId !== null && account.externalAccountId !== accountId) {
     throw new ApplicationError(
       "IDENTITY_CHANGED",
-      "Active Claude credential belongs to a different account",
+      "Stored Claude credential belongs to a different account",
     );
   }
 }
 
 export class AnthropicProviderAdapter implements ProviderAdapter {
   public readonly provider = "anthropic" as const;
-  readonly #paths: ApplicationPaths;
   readonly #dependencies: AnthropicProviderDependencies;
   // An access token maps to exactly one upstream account, so identity only
-  // needs re-verification when the token changes. Probing the profile
-  // endpoint every cycle doubled request volume and drew 429s.
+  // needs re-verification when the token changes.
   readonly #verifiedIdentities = new Map<
     string,
     { accessToken: string; accountId: string; email: string | null }
   >();
-  #projectedAccountId: string | null = null;
 
-  public constructor(input: {
-    paths: ApplicationPaths;
-    dependencies: AnthropicProviderDependencies;
-  }) {
-    this.#paths = input.paths;
+  public constructor(input: { dependencies: AnthropicProviderDependencies }) {
     this.#dependencies = input.dependencies;
   }
 
-  public async start(): Promise<void> {
-    const active = this.#dependencies.activeAccount();
-    if (active?.provider !== "anthropic") {
-      return;
-    }
-    // The committed credential usually already lives in the active profile
-    // and its refresh token has rotated past the saved profile's copy, so a
-    // restart must verify rather than re-project.
-    if (
-      await activeProfileHoldsAccount({
-        account: active,
-        paths: this.#paths,
-        now: this.#dependencies.now(),
-        fetchImplementation: this.#dependencies.fetchImplementation,
-      })
-    ) {
-      this.#projectedAccountId = active.id;
-      return;
-    }
-    await this.activate(active);
-  }
-
-  public async stop(): Promise<void> {}
-
   public async probe(account: Account): Promise<ProviderProbeResult> {
     const anthropicAccount = this.requireAccount(account);
-    const active = this.#dependencies.activeAccount();
-    const profilePath =
-      active?.id === anthropicAccount.id || this.#projectedAccountId === anthropicAccount.id
-        ? this.#paths.claudeActiveProfile
-        : anthropicAccount.profilePath;
+    const profilePath = anthropicAccount.profilePath;
+    if (profilePath === null) {
+      throw new ApplicationError("CREDENTIAL_MISSING", `${account.label} has no stored profile`);
+    }
     const reader = defaultClaudeCredentialReader();
     let credential = await reader.read(profilePath);
     if (credential.expiresAt <= this.#dependencies.now().getTime() + 300_000) {
@@ -184,78 +124,6 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
       },
       usage,
     };
-  }
-
-  public async pauseDispatch(): Promise<void> {}
-
-  public resumeDispatch(): void {}
-
-  public async waitUntilIdle(): Promise<boolean> {
-    const processHandle = Bun.spawn(["claude", "agents", "--json"], {
-      env: { ...process.env, CLAUDE_CONFIG_DIR: this.#paths.claudeActiveProfile },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const timeout = setTimeout(() => processHandle.kill("SIGTERM"), 5_000);
-    const [exitCode, stdout] = await Promise.all([
-      processHandle.exited,
-      new Response(processHandle.stdout).text(),
-    ]);
-    clearTimeout(timeout);
-    if (exitCode !== 0) {
-      return false;
-    }
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(stdout);
-    } catch {
-      return false;
-    }
-    return claudeAgentsIdle(decoded);
-  }
-
-  public async synchronizeSource(account: Account | null): Promise<void> {
-    if (account === null) {
-      return;
-    }
-    const anthropicAccount = this.requireAccount(account);
-    const reader = defaultClaudeCredentialReader();
-    let activeCredential = await reader.read(this.#paths.claudeActiveProfile);
-    if (activeCredential.expiresAt <= this.#dependencies.now().getTime() + 300_000) {
-      activeCredential = await refreshClaudeProfile({
-        profilePath: this.#paths.claudeActiveProfile,
-        credentialReader: reader,
-      });
-    }
-    const profile = await fetchClaudeProfile(
-      activeCredential.accessToken,
-      this.#dependencies.fetchImplementation,
-    );
-    assertIdentity(anthropicAccount, profile.accountId);
-    await projectClaudeCredential({
-      credential: activeCredential,
-      targetProfilePath: anthropicAccount.profilePath,
-    });
-  }
-
-  public async runtimeExternalAccountId(): Promise<string | null> {
-    const credential = await defaultClaudeCredentialReader().read(this.#paths.claudeActiveProfile);
-    const profile = await fetchClaudeProfile(
-      credential.accessToken,
-      this.#dependencies.fetchImplementation,
-    );
-    return profile.accountId;
-  }
-
-  public async activate(account: Account): Promise<void> {
-    const anthropicAccount = this.requireAccount(account);
-    await activateClaudeAccount({
-      account: anthropicAccount,
-      paths: this.#paths,
-      waitUntilIdle: () => this.waitUntilIdle(),
-    });
-    this.#projectedAccountId = anthropicAccount.id;
   }
 
   private requireAccount(account: Account): Extract<Account, { provider: "anthropic" }> {

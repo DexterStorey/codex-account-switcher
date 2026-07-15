@@ -2,9 +2,6 @@ import {
   type Account,
   AutomationPolicySchema,
   type ProviderId,
-  type RuntimeClient,
-  RuntimeSessionSchema,
-  type SwitchPhase,
   SwitchRecordSchema,
 } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
@@ -14,6 +11,8 @@ import { AnthropicProviderAdapter } from "./providers/claude/provider.ts";
 import type { CredentialVault } from "./providers/codex/auth.ts";
 import { OpenAiProviderAdapter } from "./providers/codex/provider.ts";
 import type { ProviderAdapter } from "./providers/provider.ts";
+import { type RunningProxy, startProxy } from "./proxy.ts";
+import { createRuntimeCredentialSource } from "./runtime-source.ts";
 import { selectRotation } from "./selection.ts";
 import type { StateStore } from "./storage.ts";
 
@@ -51,43 +50,16 @@ function healthForError(error: unknown): Account["health"] {
   return "temporarilyUnreachable";
 }
 
-async function waitFor(
-  predicate: () => Promise<boolean>,
-  timeoutMilliseconds: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (Date.now() < deadline) {
-    if (await predicate()) {
-      return true;
-    }
-    await Bun.sleep(500);
-  }
-  return false;
-}
-
-class SwitchExecutionError extends ApplicationError {
-  public readonly dispatchSafe: boolean;
-
-  public constructor(error: unknown, dispatchSafe: boolean) {
-    super("SWITCH_FAILED", errorMessage(error), {
-      cause: error instanceof Error ? error : undefined,
-    });
-    this.dispatchSafe = dispatchSafe;
-  }
-}
-
 export class AccountManager {
   readonly #store: StateStore;
+  readonly #paths: ApplicationPaths;
   readonly #dependencies: ManagerDependencies;
   readonly #adapters: ProviderAdapters;
+  readonly #vault: CredentialVault;
   readonly #providerOperationTails = new Map<ProviderId, Promise<void>>();
-  readonly #providerBarriers = new Map<ProviderId, Promise<void>>();
-  readonly #providerBarrierReleases = new Map<ProviderId, () => void>();
-  readonly #runtimeIdentifiers = new Map<string, string>();
-  // Accounts whose usage endpoint answered 429 are left alone until the
-  // cooldown passes; re-probing every cycle just extends the rate limit.
   readonly #probeCooldownUntil = new Map<string, number>();
   readonly #lastProbeStartedAt = new Map<string, number>();
+  #proxy: RunningProxy | null = null;
   #monitor: ReturnType<typeof setInterval> | null = null;
   #refreshOperation: Promise<void> | null = null;
   #stopping = false;
@@ -100,29 +72,17 @@ export class AccountManager {
     adapters?: ProviderAdapters;
   }) {
     this.#store = input.store;
+    this.#paths = input.paths;
+    this.#vault = input.vault;
     this.#dependencies = { ...defaultDependencies, ...input.dependencies };
-    const activeAccount = (provider: ProviderId) => {
-      const accountId = this.#store.findProviderState(provider).activeAccountId;
-      return accountId === null ? null : this.#store.findAccount(accountId);
-    };
     this.#adapters =
       input.adapters ??
       ({
         openai: new OpenAiProviderAdapter({
-          paths: input.paths,
           vault: input.vault,
-          dependencies: {
-            ...this.#dependencies,
-            activeAccount: () => activeAccount("openai"),
-          },
+          dependencies: this.#dependencies,
         }),
-        anthropic: new AnthropicProviderAdapter({
-          paths: input.paths,
-          dependencies: {
-            ...this.#dependencies,
-            activeAccount: () => activeAccount("anthropic"),
-          },
-        }),
+        anthropic: new AnthropicProviderAdapter({ dependencies: this.#dependencies }),
       } satisfies ProviderAdapters);
     if (
       this.#adapters.openai.provider !== "openai" ||
@@ -135,28 +95,18 @@ export class AccountManager {
     }
   }
 
+  public get proxyPort(): number | null {
+    return this.#proxy?.port ?? null;
+  }
+
   public async start(): Promise<void> {
     this.#stopping = false;
-    for (const adapter of Object.values(this.#adapters)) {
-      try {
-        await adapter.start();
-      } catch (error) {
-        process.stderr.write(
-          `${adapter.provider} adapter failed to start: ${errorMessage(error)}\n`,
-        );
-        await adapter.stop().catch(() => undefined);
-        const activeAccountId = this.#store.findProviderState(adapter.provider).activeAccountId;
-        for (const account of this.#store.listAccounts(adapter.provider)) {
-          this.#store.saveAccount({
-            ...account,
-            health:
-              account.id === activeAccountId ? healthForError(error) : "temporarilyUnreachable",
-            updatedAt: this.#dependencies.now().toISOString(),
-          });
-        }
-      }
-    }
-    await this.recoverInterruptedSwitches();
+    const source = createRuntimeCredentialSource({
+      store: { activeAccount: (provider) => this.activeAccount(provider) },
+      vault: this.#vault,
+      fetchImplementation: this.#dependencies.fetchImplementation,
+    });
+    this.#proxy = startProxy({ source, port: this.#paths.proxyPort });
     void this.refreshAll().catch(() => undefined);
     this.#monitor = setInterval(() => {
       void this.refreshAll().catch(() => undefined);
@@ -169,39 +119,26 @@ export class AccountManager {
       clearInterval(this.#monitor);
       this.#monitor = null;
     }
-    // Shutdown must terminate even when a refresh or an adapter is wedged on
-    // a child process; a hung stop holds the startup lock and strands every
-    // managed session on a dead socket.
     const bounded = (work: Promise<unknown> | undefined, milliseconds: number) =>
       work === undefined ? Promise.resolve() : Promise.race([work, Bun.sleep(milliseconds)]);
     await bounded(
       this.#refreshOperation?.catch(() => undefined),
       15_000,
     );
-    for (const release of this.#providerBarrierReleases.values()) {
-      release();
-    }
-    this.#providerBarriers.clear();
-    this.#providerBarrierReleases.clear();
-    await Promise.all(
-      Object.values(this.#adapters).map((adapter) =>
-        bounded(
-          adapter.stop().catch(() => undefined),
-          10_000,
-        ),
-      ),
+    await bounded(
+      this.#proxy?.stop().catch(() => undefined),
+      5_000,
     );
+    this.#proxy = null;
   }
 
   public dashboard() {
     return this.#store.dashboard();
   }
 
-  public async ensureProviderReady(provider: ProviderId): Promise<void> {
-    await this.withProviderOperation(provider, async () => {
-      const adapter = this.adapter(provider);
-      await (adapter.ensureReady?.() ?? adapter.start());
-    });
+  public activeAccount(provider: ProviderId): Account | null {
+    const accountId = this.#store.findProviderState(provider).activeAccountId;
+    return accountId === null ? null : this.#store.findAccount(accountId);
   }
 
   public setAutomationPolicy(input: {
@@ -249,149 +186,52 @@ export class AccountManager {
     this.#store.saveAccount(result.account);
   }
 
+  // A switch is now a validated state update: the proxy reads the active
+  // account per request, so pointing every subsequent request at the target
+  // is all that is required. The target is probed first so a switch never
+  // commits to an unusable credential.
   public async switchAccount(
     provider: ProviderId,
     targetAccountId: string,
     reason = "manual",
   ): Promise<void> {
     return this.withProviderOperation(provider, async () => {
-      if (!this.#providerBarriers.has(provider)) {
-        let releaseBarrier: (() => void) | undefined;
-        const barrier = new Promise<void>((resolve) => {
-          releaseBarrier = resolve;
-        });
-        this.#providerBarriers.set(provider, barrier);
-        if (releaseBarrier !== undefined) {
-          this.#providerBarrierReleases.set(provider, releaseBarrier);
-        }
+      const state = this.#store.findProviderState(provider);
+      const target = this.#store.findAccount(targetAccountId);
+      if (target === null || target.provider !== provider || !target.enabled) {
+        throw new ApplicationError(
+          "INVALID_TARGET",
+          `Account ${targetAccountId} is not an enabled ${provider} account`,
+        );
       }
-      const adapter = this.adapter(provider);
-      let dispatchSafe = true;
-      try {
-        await adapter.pauseDispatch();
-        await this.performSwitch(provider, targetAccountId, reason);
-      } catch (error) {
-        if (error instanceof SwitchExecutionError) {
-          dispatchSafe = error.dispatchSafe;
-        }
-        throw error;
-      } finally {
-        if (dispatchSafe) {
-          adapter.resumeDispatch();
-          this.#providerBarriers.delete(provider);
-          this.#providerBarrierReleases.get(provider)?.();
-          this.#providerBarrierReleases.delete(provider);
-        }
+      if (state.activeAccountId !== targetAccountId) {
+        await this.probeAndSave(target);
       }
+      const now = this.#dependencies.now().toISOString();
+      this.#store.commitSwitch(
+        SwitchRecordSchema.parse({
+          id: crypto.randomUUID(),
+          provider,
+          sourceAccountId: state.activeAccountId,
+          targetAccountId,
+          phase: "committed",
+          reason,
+          generation: state.generation + 1,
+          message: null,
+          createdAt: now,
+          updatedAt: now,
+        }),
+        {
+          ...state,
+          activeAccountId: target.id,
+          generation: state.generation + 1,
+          switchedAt: now,
+        },
+      );
     });
-  }
-
-  public async beginClaudeTurn(input: {
-    upstreamSessionId: string;
-    processId: number;
-  }): Promise<{ generation: number }> {
-    for (;;) {
-      const barrier = this.#providerBarriers.get("anthropic");
-      if (barrier !== undefined) {
-        await barrier;
-        continue;
-      }
-      const generation = this.#store.findProviderState("anthropic").generation;
-      this.updateClaudeSession({ ...input, generation, state: "working" });
-      return { generation };
-    }
-  }
-
-  public updateClaudeSession(input: {
-    upstreamSessionId: string;
-    processId: number;
-    generation?: number;
-    state: "idle" | "working";
-  }): void {
-    this.updateRuntimeSession({
-      ...input,
-      generation: input.generation ?? this.#store.findProviderState("anthropic").generation,
-      client: "claude",
-      provider: "anthropic",
-    });
-  }
-
-  public removeClaudeSession(input: { upstreamSessionId: string; processId: number }): void {
-    const key = `claude:${input.processId}:${input.upstreamSessionId}`;
-    const identifier = this.#runtimeIdentifiers.get(key);
-    const persisted = this.#store
-      .listRuntimeSessions()
-      .find((session) => session.client === "claude" && session.processId === input.processId);
-    const sessionId = identifier ?? persisted?.id;
-    if (sessionId !== undefined) {
-      this.#store.removeRuntimeSession(sessionId);
-    }
-    this.#runtimeIdentifiers.delete(key);
-  }
-
-  private updateRuntimeSession(input: {
-    upstreamSessionId: string;
-    processId: number;
-    generation: number;
-    state: "idle" | "working";
-    client: "claude";
-    provider: ProviderId;
-  }): void {
-    const key = `${input.client}:${input.processId}:${input.upstreamSessionId}`;
-    const persisted = this.#store
-      .listRuntimeSessions()
-      .find((session) => session.client === input.client && session.processId === input.processId);
-    const id = this.#runtimeIdentifiers.get(key) ?? persisted?.id ?? crypto.randomUUID();
-    this.#runtimeIdentifiers.set(key, id);
-    const prior = this.#store.listRuntimeSessions().find((session) => session.id === id);
-    const now = this.#dependencies.now().toISOString();
-    this.#store.saveRuntimeSession(
-      RuntimeSessionSchema.parse({
-        id,
-        client: input.client satisfies RuntimeClient,
-        provider: input.provider,
-        processId: input.processId,
-        state: input.state,
-        generation: input.generation,
-        startedAt: prior?.startedAt ?? now,
-        updatedAt: now,
-      }),
-    );
-  }
-
-  private adapter(provider: ProviderId): ProviderAdapter {
-    switch (provider) {
-      case "openai":
-        return this.#adapters.openai;
-      case "anthropic":
-        return this.#adapters.anthropic;
-    }
-  }
-
-  private async withProviderOperation<Result>(
-    provider: ProviderId,
-    operation: () => Promise<Result>,
-  ): Promise<Result> {
-    const previous = this.#providerOperationTails.get(provider) ?? Promise.resolve();
-    let release: (() => void) | undefined;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => current);
-    this.#providerOperationTails.set(provider, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release?.();
-      if (this.#providerOperationTails.get(provider) === tail) {
-        this.#providerOperationTails.delete(provider);
-      }
-    }
   }
 
   private async performRefreshAll(): Promise<void> {
-    this.pruneStoppedRuntimeSessions();
     for (const account of this.#store.listAccounts()) {
       if (this.#stopping) {
         return;
@@ -404,8 +244,8 @@ export class AccountManager {
         continue;
       }
       // Only the active account needs minute-level freshness (it drives
-      // rotation); idle accounts get coarse readings so four registered
-      // accounts do not quadruple the provider's probe traffic.
+      // rotation); idle accounts get coarse readings so many registered
+      // accounts do not multiply the provider's probe traffic.
       const isActive =
         this.#store.findProviderState(account.provider).activeAccountId === account.id;
       const probeInterval = isActive ? 0 : 5 * 60_000;
@@ -448,76 +288,11 @@ export class AccountManager {
       now: this.#dependencies.now(),
     });
     if (decision.rotate) {
-      await this.switchAccount(provider, decision.targetAccountId, `automatic:${decision.reason}`);
+      await this.performSwitchForAutomation(provider, decision.targetAccountId, decision.reason);
     }
   }
 
-  private async recoverInterruptedSwitches(): Promise<void> {
-    const terminalPhases = new Set<SwitchPhase>(["committed", "rolledBack", "failed"]);
-    const records = this.#store.listSwitchRecords(100);
-    for (const provider of ["openai", "anthropic"] as const) {
-      const record = records.find((candidate) => candidate.provider === provider);
-      if (record === undefined || terminalPhases.has(record.phase)) {
-        continue;
-      }
-      const source =
-        record.sourceAccountId === null ? null : this.#store.findAccount(record.sourceAccountId);
-      const target = this.#store.findAccount(record.targetAccountId);
-      let recovered = false;
-      const adapter = this.adapter(provider);
-      if (
-        ["synchronizing", "activating", "verifying"].includes(record.phase) &&
-        source?.provider === provider
-      ) {
-        await adapter.pauseDispatch();
-        try {
-          if (await waitFor(() => adapter.waitUntilIdle(), 5_000)) {
-            const inspectRuntimeIdentity = adapter.runtimeExternalAccountId;
-            const runtimeExternalAccountId =
-              inspectRuntimeIdentity === undefined
-                ? null
-                : await inspectRuntimeIdentity.call(adapter).catch(() => null);
-            const targetIsActive =
-              target?.provider === provider &&
-              target.externalAccountId !== null &&
-              target.externalAccountId === runtimeExternalAccountId;
-            if (
-              targetIsActive ||
-              (record.phase === "verifying" && inspectRuntimeIdentity === undefined)
-            ) {
-              await adapter.synchronizeSource(target);
-            } else if (record.phase === "synchronizing") {
-              await adapter.synchronizeSource(source).catch(() => undefined);
-            }
-            await adapter.activate(source);
-            await this.probeAndSave(source);
-            recovered = true;
-          }
-        } catch {
-          recovered = false;
-        } finally {
-          adapter.resumeDispatch();
-        }
-      }
-      if (source !== null) {
-        this.#store.saveAccount({
-          ...source,
-          health: "unchecked",
-          updatedAt: this.#dependencies.now().toISOString(),
-        });
-      }
-      this.#store.saveSwitchRecord({
-        ...record,
-        phase: recovered ? "rolledBack" : "failed",
-        message: recovered
-          ? "Recovered the committed source account after manager restart"
-          : `Manager restarted during ${record.phase}; reassert the committed account if health verification fails`,
-        updatedAt: this.#dependencies.now().toISOString(),
-      });
-    }
-  }
-
-  private async performSwitch(
+  private async performSwitchForAutomation(
     provider: ProviderId,
     targetAccountId: string,
     reason: string,
@@ -525,120 +300,58 @@ export class AccountManager {
     const state = this.#store.findProviderState(provider);
     const target = this.#store.findAccount(targetAccountId);
     if (target === null || target.provider !== provider || !target.enabled) {
-      throw new ApplicationError(
-        "INVALID_TARGET",
-        `Account ${targetAccountId} is not an enabled ${provider} account`,
-      );
+      return;
     }
-    const reasserting = state.activeAccountId === targetAccountId;
-    if (!reasserting) {
-      await this.probeAndSave(target);
-    }
-    const switchId = crypto.randomUUID();
-    const generation = state.generation + 1;
-    const createdAt = this.#dependencies.now().toISOString();
-    let phase: SwitchPhase = "prepared";
-    const record = (message: string | null = null) =>
+    const now = this.#dependencies.now().toISOString();
+    this.#store.commitSwitch(
       SwitchRecordSchema.parse({
-        id: switchId,
+        id: crypto.randomUUID(),
         provider,
         sourceAccountId: state.activeAccountId,
         targetAccountId,
-        phase,
-        reason,
-        generation,
-        message,
-        createdAt,
-        updatedAt: this.#dependencies.now().toISOString(),
-      });
-    this.#store.saveSwitchRecord(record());
-    let activationAttempted = false;
-    const adapter = this.adapter(provider);
-    const source =
-      state.activeAccountId === null ? null : this.#store.findAccount(state.activeAccountId);
-
-    try {
-      phase = "draining";
-      this.#store.saveSwitchRecord(record());
-      // Managed Codex runs on the HTTP responses transport: an in-flight turn
-      // finishes on the bearer token it started with and the dispatch gate
-      // queues newly submitted turns during activation, so there is nothing
-      // to drain and a switch takes seconds. Claude Code caches credentials
-      // in process memory, so it must reach a request boundary first.
-      if (provider === "anthropic" && !(await this.waitUntilProviderIdle(provider))) {
-        throw new ApplicationError(
-          "SESSIONS_BUSY",
-          `${provider} sessions did not become idle within 60 seconds`,
-        );
-      }
-      if (source?.id !== target.id) {
-        phase = "synchronizing";
-        this.#store.saveSwitchRecord(record());
-        await adapter.synchronizeSource(source);
-      }
-      phase = "activating";
-      this.#store.saveSwitchRecord(record());
-      activationAttempted = true;
-      await adapter.activate(target);
-      phase = "verifying";
-      this.#store.saveSwitchRecord(record());
-      await this.probeAndSave(target);
-      phase = "committed";
-      this.#store.commitSwitch(record(), {
+        phase: "committed",
+        reason: `automatic:${reason}`,
+        generation: state.generation + 1,
+        message: null,
+        createdAt: now,
+        updatedAt: now,
+      }),
+      {
         ...state,
         activeAccountId: target.id,
-        generation,
-        switchedAt: this.#dependencies.now().toISOString(),
-      });
-    } catch (error) {
-      if (activationAttempted) {
-        const inspectRuntimeIdentity = adapter.runtimeExternalAccountId;
-        const runtimeExternalAccountId =
-          inspectRuntimeIdentity === undefined
-            ? null
-            : await inspectRuntimeIdentity.call(adapter).catch(() => null);
-        if (
-          target.externalAccountId !== null &&
-          target.externalAccountId === runtimeExternalAccountId
-        ) {
-          await adapter.synchronizeSource(target).catch(() => undefined);
-        }
-      }
-      const rolledBack = activationAttempted
-        ? await this.rollback(provider, source).catch(() => false)
-        : false;
-      phase = rolledBack ? "rolledBack" : "failed";
-      this.#store.saveSwitchRecord(record(errorMessage(error)));
-      throw new SwitchExecutionError(error, !activationAttempted || rolledBack);
+        generation: state.generation + 1,
+        switchedAt: now,
+      },
+    );
+  }
+
+  private adapter(provider: ProviderId): ProviderAdapter {
+    switch (provider) {
+      case "openai":
+        return this.#adapters.openai;
+      case "anthropic":
+        return this.#adapters.anthropic;
     }
   }
 
-  private async rollback(provider: ProviderId, source: Account | null): Promise<boolean> {
-    if (source === null) {
-      return false;
-    }
-    await this.adapter(provider).activate(source);
-    await this.probeAndSave(source);
-    return true;
-  }
-
-  private async waitUntilProviderIdle(provider: ProviderId): Promise<boolean> {
-    return waitFor(async () => {
-      this.pruneStoppedRuntimeSessions();
-      const managedSessionsIdle = this.#store
-        .listRuntimeSessions()
-        .filter((session) => session.provider === provider)
-        .every((session) => session.state === "idle");
-      return managedSessionsIdle && (await this.adapter(provider).waitUntilIdle());
-    }, 60_000);
-  }
-
-  private pruneStoppedRuntimeSessions(): void {
-    for (const session of this.#store.listRuntimeSessions()) {
-      try {
-        process.kill(session.processId, 0);
-      } catch {
-        this.#store.removeRuntimeSession(session.id);
+  private async withProviderOperation<Result>(
+    provider: ProviderId,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const previous = this.#providerOperationTails.get(provider) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    this.#providerOperationTails.set(provider, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+      if (this.#providerOperationTails.get(provider) === tail) {
+        this.#providerOperationTails.delete(provider);
       }
     }
   }

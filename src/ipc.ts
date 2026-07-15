@@ -42,15 +42,6 @@ const PolicyParamsSchema = z
   })
   .strict();
 
-const PiSessionParamsSchema = z
-  .object({
-    sessionId: z.string().min(1),
-    processId: z.number().int().positive(),
-    generation: z.number().int().nonnegative().optional(),
-    state: z.enum(["idle", "working"]).optional(),
-  })
-  .strict();
-
 export interface ManagerServer {
   close(): Promise<void>;
   finished: Promise<void>;
@@ -73,11 +64,8 @@ async function dispatch(
     case "usage/refresh":
       await manager.refreshAll();
       return manager.dashboard();
-    case "provider/ensure": {
-      const parsed = z.object({ provider: ProviderIdSchema }).strict().parse(params);
-      await manager.ensureProviderReady(parsed.provider);
-      return { ready: true };
-    }
+    case "proxy/port":
+      return { port: manager.proxyPort };
     case "provider/switch": {
       const parsed = SwitchParamsSchema.parse(params);
       await manager.switchAccount(parsed.provider, parsed.targetAccountId, parsed.reason);
@@ -86,39 +74,6 @@ async function dispatch(
     case "policy/set": {
       const parsed = PolicyParamsSchema.parse(params);
       return manager.setAutomationPolicy(parsed);
-    }
-    case "claude/session/start": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      manager.updateClaudeSession({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-        state: "idle",
-      });
-      return { acknowledged: true };
-    }
-    case "claude/turn/begin": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      return manager.beginClaudeTurn({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-      });
-    }
-    case "claude/turn/end": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      manager.updateClaudeSession({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-        state: "idle",
-      });
-      return { acknowledged: true };
-    }
-    case "claude/session/end": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      manager.removeClaudeSession({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-      });
-      return { acknowledged: true };
     }
     default:
       throw new ApplicationError("METHOD_NOT_FOUND", `Unknown manager method ${method}`);
@@ -288,8 +243,17 @@ export function requestSwitch(
     method: "provider/switch",
     params: { provider, targetAccountId, reason: "manual" },
     schema: DashboardSnapshotSchema,
-    // A switch legitimately waits for managed sessions to drain (60s budget)
-    // plus credential refresh and verification round-trips.
-    timeoutMilliseconds: 120_000,
+    // The switch itself is a store update; the budget covers one probe of the
+    // target credential to confirm it is usable before committing.
+    timeoutMilliseconds: 30_000,
   });
+}
+
+export function readProxyPort(socketPath: string): Promise<number> {
+  return managerRequest({
+    socketPath,
+    method: "proxy/port",
+    schema: z.object({ port: z.number().int().positive() }),
+    timeoutMilliseconds: 15_000,
+  }).then((result) => result.port);
 }

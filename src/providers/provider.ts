@@ -5,23 +5,9 @@ export interface ProviderProbeResult {
   usage: UsageSnapshot;
 }
 
-export interface ProviderRuntimeCredential {
-  provider: "openai";
-  accessToken: string;
-  accountId: string;
-}
-
+// Adapters now only read usage and health. Running sessions get their
+// credentials from the proxy, so there is no runtime to activate or drain.
 export interface ProviderAdapter {
   readonly provider: ProviderId;
-  start(): Promise<void>;
-  ensureReady?(): Promise<void>;
-  stop(): Promise<void>;
   probe(account: Account): Promise<ProviderProbeResult>;
-  pauseDispatch(): Promise<void>;
-  resumeDispatch(): void;
-  waitUntilIdle(): Promise<boolean>;
-  synchronizeSource(account: Account | null): Promise<void>;
-  runtimeExternalAccountId?(): Promise<string | null>;
-  activate(account: Account): Promise<void>;
-  runtimeCredential?(account: Account): Promise<ProviderRuntimeCredential>;
 }

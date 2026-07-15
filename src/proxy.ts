@@ -12,6 +12,10 @@ import type { FetchImplementation } from "./http.ts";
 export interface UpstreamInjection {
   baseUrl: string;
   headers: Record<string, string>;
+  // Merged into any existing comma-separated header value rather than
+  // overwriting it — e.g. adding the OAuth beta without dropping the client's
+  // own feature betas.
+  appendHeaders?: Record<string, string>;
   stripHeaders?: readonly string[];
 }
 
@@ -70,6 +74,17 @@ function forwardHeaders(incoming: Headers, injection: UpstreamInjection): Header
   }
   for (const [name, value] of Object.entries(injection.headers)) {
     headers.set(name, value);
+  }
+  for (const [name, value] of Object.entries(injection.appendHeaders ?? {})) {
+    const existing = headers.get(name);
+    const parts = new Set(
+      (existing === null ? "" : existing)
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0),
+    );
+    parts.add(value);
+    headers.set(name, [...parts].join(","));
   }
   return headers;
 }
@@ -166,8 +181,12 @@ export function startProxy(options: ProxyOptions & { port?: number }): RunningPr
     idleTimeout: 240,
     fetch: (request) => handler.handle(request),
   });
+  const port = server.port;
+  if (port === undefined) {
+    throw new ApplicationError("PROXY_BIND_FAILED", "Proxy did not bind a port");
+  }
   return {
-    port: server.port,
+    port,
     async stop() {
       await server.stop(true);
     },
