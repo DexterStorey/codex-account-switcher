@@ -653,11 +653,14 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         if (process.stdout.isTTY) {
           const { runTuiDashboard } = await import("./tui/dashboard.ts");
           await runTuiDashboard(context.paths.managerSocket);
-        } else {
-          process.stdout.write(
-            `${renderDashboard(await readDashboard(context.paths.managerSocket))}\n`,
-          );
+          // The native renderer can leave the event loop alive after teardown;
+          // exit deterministically so quitting never orphans the process.
+          context.store.close();
+          process.exit(0);
         }
+        process.stdout.write(
+          `${renderDashboard(await readDashboard(context.paths.managerSocket))}\n`,
+        );
         return 0;
       case "help":
       case "--help":

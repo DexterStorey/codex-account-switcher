@@ -82,30 +82,30 @@ function accountLine(
   const badge = healthBadge(ctx.theme, account);
   const marker = isActive ? "●" : isSelected ? "▸" : "○";
   const markerColor = isActive ? ctx.theme.good : isSelected ? ctx.theme.accent : ctx.theme.faint;
+  // The label field reserves its last column for an attention asterisk so the
+  // windows stay column-aligned whether or not an account is flagged.
   const children = [
     Text({ content: ` ${marker} `, fg: rgb(markerColor) }),
     Text({
-      content: pad(account.label, labelWidth),
+      content: pad(account.label, labelWidth - 2),
       fg: rgb(isActive || isSelected ? ctx.theme.fg : ctx.theme.dim),
       attributes: isActive ? 1 : 0,
     }),
+    Text({ content: badge === null ? "  " : " *", fg: rgb(badge?.color ?? ctx.theme.dim) }),
   ];
   if (windows.length === 0) {
     children.push(
-      Text({ content: account.health === "ready" ? "  …" : "  —", fg: rgb(ctx.theme.dim) }),
+      Text({ content: account.health === "ready" ? " …" : " —", fg: rgb(ctx.theme.dim) }),
     );
   }
   for (const window of windows.slice(0, 3)) {
     children.push(
-      Text({ content: ` ${pad(shortWindow(window.label), 5)} `, fg: rgb(ctx.theme.dim) }),
+      Text({ content: ` ${shortWindow(window.label)} `, fg: rgb(ctx.theme.dim) }),
       Text({
         content: `${meter(window.usedPercent, 6)} ${percentLabel(window.usedPercent)}`,
         fg: rgb(pressureColor(ctx.theme, window.usedPercent)),
       }),
     );
-  }
-  if (badge !== null) {
-    children.push(Text({ content: `  ${badge.text}`, fg: rgb(badge.color) }));
   }
   return Box(
     {
@@ -167,6 +167,29 @@ function providerPanel(
   );
 }
 
+// Explains the attention asterisk, shown only when an account is flagged.
+function legend(ctx: Ctx, snapshot: DashboardSnapshot) {
+  const flagged = snapshot.accounts
+    .map((account) => healthBadge(ctx.theme, account))
+    .filter((badge): badge is NonNullable<typeof badge> => badge !== null);
+  if (flagged.length === 0) {
+    return Text({ content: "" });
+  }
+  const distinct = [...new Map(flagged.map((badge) => [badge.text, badge])).values()];
+  return Box(
+    { flexDirection: "row" },
+    Text({ content: " * ", fg: rgb(ctx.theme.warn) }),
+    ...distinct.flatMap((badge, index) => [
+      Text({
+        content: `${index === 0 ? "" : "· "}${badge.text.replace(/^[⚠·]\s*/, "")}`,
+        fg: rgb(badge.color),
+      }),
+      Text({ content: " ", fg: rgb(ctx.theme.dim) }),
+    ]),
+    Text({ content: "— run tokmax list", fg: rgb(ctx.theme.dim) }),
+  );
+}
+
 function view(ctx: Ctx, snapshot: DashboardSnapshot, rows: Row[], selected: number, note: string) {
   const clock = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return Box(
@@ -191,6 +214,7 @@ function view(ctx: Ctx, snapshot: DashboardSnapshot, rows: Row[], selected: numb
     // Absorbs remaining height so the app fills the terminal and the footer
     // sits at the bottom, without ever shrinking the account panels.
     Box({ flexGrow: 1, width: "100%" }),
+    legend(ctx, snapshot),
     Text({
       content: "↑↓ select · ⏎ switch · a auto-rotate · r refresh · q quit",
       fg: rgb(ctx.theme.dim),
@@ -216,7 +240,10 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
   };
 
   // Build the next frame fully before swapping it in, so a render error can
-  // never leave the cleared root blank (the white-screen failure mode).
+  // never leave the cleared root blank (the white-screen failure mode). Old
+  // subtrees are destroyed, not just removed: OpenTUI's remove() only detaches,
+  // so without destroy the native renderables leak every frame until the
+  // renderer runs out of memory and the screen goes blank after some minutes.
   const paint = () => {
     clampSelection();
     let next: ReturnType<typeof Box>;
@@ -227,6 +254,7 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
     }
     for (const child of [...renderer.root.getChildren()]) {
       renderer.root.remove(child);
+      child.destroyRecursively();
     }
     renderer.root.add(next);
   };

@@ -159,3 +159,28 @@ export const DashboardSnapshotSchema = z
   })
   .strict();
 export type DashboardSnapshot = z.infer<typeof DashboardSnapshotSchema>;
+
+// A measured point of a usage window over time, for the analytics charts.
+export const UsageHistoryPointSchema = z
+  .object({ at: z.number().int().nonnegative(), usedPercent: z.number().min(0).max(100) })
+  .strict();
+export type UsageHistoryPoint = z.infer<typeof UsageHistoryPointSchema>;
+
+export const UsageHistorySchema = z
+  .object({
+    windowId: z.string().min(1),
+    label: z.string().min(1),
+    points: z.array(UsageHistoryPointSchema),
+  })
+  .strict();
+export type UsageHistory = z.infer<typeof UsageHistorySchema>;
+
+export const AnalyticsSnapshotSchema = z
+  .object({
+    snapshot: DashboardSnapshotSchema,
+    history: z.array(
+      z.object({ accountId: z.uuid(), windows: z.array(UsageHistorySchema) }).strict(),
+    ),
+  })
+  .strict();
+export type AnalyticsSnapshot = z.infer<typeof AnalyticsSnapshotSchema>;
