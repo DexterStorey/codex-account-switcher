@@ -174,3 +174,14 @@ export const DashboardSnapshotSchema = z
   })
   .strict();
 export type DashboardSnapshot = z.infer<typeof DashboardSnapshotSchema>;
+
+// The dashboard snapshot plus each account's usage trend, for the live TUI.
+export const AnalyticsSnapshotSchema = z
+  .object({
+    snapshot: DashboardSnapshotSchema,
+    history: z.array(
+      z.object({ accountId: z.uuid(), windows: z.array(UsageHistorySchema) }).strict(),
+    ),
+  })
+  .strict();
+export type AnalyticsSnapshot = z.infer<typeof AnalyticsSnapshotSchema>;

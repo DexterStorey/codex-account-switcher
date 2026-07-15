@@ -6,11 +6,6 @@ import type {
   UsageSnapshot,
   UsageWindow,
 } from "./domain.ts";
-import { readDashboard, refreshUsage } from "./ipc.ts";
-
-const enterAlternateScreen = "\u001B[?1049h\u001B[?25l";
-const leaveAlternateScreen = "\u001B[?25h\u001B[?1049l";
-const clearScreen = "\u001B[2J\u001B[H";
 
 export interface RenderOptions {
   color?: boolean;
@@ -274,63 +269,4 @@ export function renderDashboard(
     "",
     paint("● active — every request uses it · q quit · r refresh · tokmax --help", "dim"),
   ].join("\n");
-}
-
-export async function runDashboard(socketPath: string): Promise<void> {
-  const color = process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
-  if (!process.stdout.isTTY) {
-    process.stdout.write(`${renderDashboard(await readDashboard(socketPath), new Date(), {})}\n`);
-    return;
-  }
-  let stopped = false;
-  let refreshing = false;
-  const redraw = async (refresh = false) => {
-    if (stopped || (refreshing && refresh)) {
-      return;
-    }
-    refreshing = refreshing || refresh;
-    try {
-      const snapshot = refresh ? await refreshUsage(socketPath) : await readDashboard(socketPath);
-      if (stopped) {
-        return;
-      }
-      process.stdout.write(
-        `${clearScreen}${renderDashboard(snapshot, new Date(), {
-          color,
-          note: refreshing && !refresh ? "refreshing…" : undefined,
-        })}`,
-      );
-    } finally {
-      if (refresh) {
-        refreshing = false;
-      }
-    }
-  };
-  process.stdout.write(enterAlternateScreen);
-  const interval = setInterval(() => void redraw(), 2_000);
-  const input = process.stdin;
-  input.setRawMode?.(true);
-  input.resume();
-  try {
-    await redraw();
-    // The store paints instantly; fresh upstream readings follow.
-    void redraw(true).catch(() => undefined);
-    await new Promise<void>((resolve) => {
-      input.on("data", (data: Buffer) => {
-        const key = data.toString("utf8");
-        if (key === "q" || key === "\u0003") {
-          resolve();
-        }
-        if (key === "r") {
-          void redraw(true).catch(() => undefined);
-        }
-      });
-    });
-  } finally {
-    stopped = true;
-    clearInterval(interval);
-    input.setRawMode?.(false);
-    input.pause();
-    process.stdout.write(leaveAlternateScreen);
-  }
 }

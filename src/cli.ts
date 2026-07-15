@@ -36,7 +36,7 @@ import { registerCodexAccount } from "./providers/codex/auth.ts";
 import { createMacOsKeychainVault } from "./providers/codex/keychain.ts";
 import { pickDefaultAccount } from "./selection.ts";
 import { createStateStore, type StateStore } from "./storage.ts";
-import { renderDashboard, runDashboard } from "./ui.ts";
+import { renderDashboard } from "./ui.ts";
 
 const CommandSchema = z.array(z.string());
 const EmptyResultSchema = z.unknown();
@@ -113,7 +113,7 @@ async function createContext(): Promise<ApplicationContext> {
 }
 
 async function runDaemon(context: ApplicationContext): Promise<void> {
-  // The daemon and its app-server children must not inherit a user project
+  // The daemon must not inherit a user project directory: a daemon parked in
   // directory: Codex threads started without an explicit cwd fall back to the
   // app-server's, and a daemon parked in a repo also pins that directory.
   try {
@@ -650,7 +650,14 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
       case undefined:
       case "dashboard":
         await ensureDaemon(context);
-        await runDashboard(context.paths.managerSocket);
+        if (process.stdout.isTTY) {
+          const { runTuiDashboard } = await import("./tui/dashboard.ts");
+          await runTuiDashboard(context.paths.managerSocket);
+        } else {
+          process.stdout.write(
+            `${renderDashboard(await readDashboard(context.paths.managerSocket))}\n`,
+          );
+        }
         return 0;
       case "help":
       case "--help":

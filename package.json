@@ -9,7 +9,7 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist && chmod 755 dist/index.js",
+    "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist --external '@opentui/*' && chmod 755 dist/index.js",
     "check": "bun run typecheck && bun run lint && bun test",
     "clean": "rm -rf dist",
     "dev": "bun run src/index.ts",
@@ -51,6 +51,7 @@
   "homepage": "https://github.com/DexterStorey/codex-account-switcher#readme",
   "author": "Dexter Storey",
   "dependencies": {
+    "@opentui/core": "^0.4.3",
     "zod": "^4.0.0"
   },
   "devDependencies": {
