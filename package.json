@@ -9,8 +9,9 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "assets": "bun run assets:screens",
+    "assets": "bun run assets:screens && bun run assets:flagship",
     "assets:screens": "bun run assets/render.ts",
+    "assets:flagship": "bun run assets/flagship.ts",
     "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist --external '@opentui/*' && chmod 755 dist/index.js",
     "check": "bun run typecheck && bun run lint && bun test",
     "clean": "rm -rf dist",
