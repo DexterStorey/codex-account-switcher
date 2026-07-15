@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { Account, UsageHistoryPoint } from "../domain.ts";
-import { healthBadge, meter, percentLabel, resetLabel, shortWindow, sparkline } from "./format.ts";
+import {
+  darkTheme,
+  detectThemeName,
+  healthBadge,
+  meter,
+  percentLabel,
+  resetLabel,
+  shortWindow,
+  sparkline,
+} from "./format.ts";
 
 const base: Account = {
   id: "00000000-0000-4000-8000-000000000001",
@@ -49,8 +58,8 @@ describe("tui format", () => {
   });
 
   test("health badge only surfaces non-healthy states", () => {
-    expect(healthBadge(base)).toBeNull();
-    expect(healthBadge({ ...base, health: "reauthenticationRequired" })?.text).toBe(
+    expect(healthBadge(darkTheme, base)).toBeNull();
+    expect(healthBadge(darkTheme, { ...base, health: "reauthenticationRequired" })?.text).toBe(
       "login required",
     );
   });
@@ -59,5 +68,12 @@ describe("tui format", () => {
     expect(shortWindow("5 hour")).toBe("5h");
     expect(shortWindow("7 day · all models")).toBe("7d");
     expect(shortWindow("GPT-5.3-Codex-Spark")).toBe("Spark");
+  });
+
+  test("theme detection honors override, then COLORFGBG, then defaults dark", () => {
+    expect(detectThemeName({ TOKMAX_THEME: "light" })).toBe("light");
+    expect(detectThemeName({ COLORFGBG: "0;15" })).toBe("light");
+    expect(detectThemeName({ COLORFGBG: "15;0" })).toBe("dark");
+    expect(detectThemeName({})).toBe("dark");
   });
 });

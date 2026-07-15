@@ -297,6 +297,24 @@ export function readProxyPort(socketPath: string): Promise<number> {
   }).then((result) => result.port);
 }
 
+export function requestPolicy(
+  socketPath: string,
+  input: {
+    provider: ProviderId;
+    enabled: boolean;
+    thresholdPercent?: number;
+    authorizationConfirmed?: boolean;
+  },
+): Promise<void> {
+  return managerRequest({
+    socketPath,
+    method: "policy/set",
+    params: input,
+    schema: z.unknown(),
+    timeoutMilliseconds: 15_000,
+  }).then(() => undefined);
+}
+
 export function requestAccountReplace(
   socketPath: string,
   account: Account,
