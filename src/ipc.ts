@@ -1,8 +1,13 @@
 import { chmod, rm } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { z } from "zod";
-import type { Account, DashboardSnapshot, ProviderId } from "./domain.ts";
-import { AccountSchema, DashboardSnapshotSchema, ProviderIdSchema } from "./domain.ts";
+import type { Account, AnalyticsSnapshot, DashboardSnapshot, ProviderId } from "./domain.ts";
+import {
+  AccountSchema,
+  AnalyticsSnapshotSchema,
+  DashboardSnapshotSchema,
+  ProviderIdSchema,
+} from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
 import type { AccountManager } from "./manager.ts";
 
@@ -75,6 +80,8 @@ async function dispatch(
       return manager.dashboard();
     case "proxy/port":
       return { port: manager.proxyPort };
+    case "dashboard/analytics":
+      return manager.analytics();
     case "provider/switch": {
       const parsed = SwitchParamsSchema.parse(params);
       await manager.switchAccount(parsed.provider, parsed.targetAccountId, parsed.reason);
@@ -234,6 +241,15 @@ export function readDashboard(socketPath: string): Promise<DashboardSnapshot> {
     socketPath,
     method: "dashboard/read",
     schema: DashboardSnapshotSchema,
+    timeoutMilliseconds: 15_000,
+  });
+}
+
+export function readAnalytics(socketPath: string): Promise<AnalyticsSnapshot> {
+  return managerRequest({
+    socketPath,
+    method: "dashboard/analytics",
+    schema: AnalyticsSnapshotSchema,
     timeoutMilliseconds: 15_000,
   });
 }
