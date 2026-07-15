@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { acquireDaemonLock } from "./daemon-lock.ts";
@@ -114,6 +115,14 @@ async function createContext(): Promise<ApplicationContext> {
 }
 
 async function runDaemon(context: ApplicationContext): Promise<void> {
+  // The daemon and its app-server children must not inherit a user project
+  // directory: Codex threads started without an explicit cwd fall back to the
+  // app-server's, and a daemon parked in a repo also pins that directory.
+  try {
+    process.chdir(homedir());
+  } catch {
+    // An unreadable home directory is not worth refusing to start over.
+  }
   // The daemon must outlive any single failed probe or child process; Bun
   // exits on unhandled rejections by default, which silently stops all
   // probing until someone next runs a tokmax command.

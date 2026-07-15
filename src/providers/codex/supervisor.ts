@@ -125,12 +125,31 @@ export async function startManagedCodexAppServer(
   }
 }
 
+// The shared app-server runs under the daemon, so a thread started without an
+// explicit directory would fall back to the daemon's cwd instead of the
+// directory the user launched from. Pin it unless the user already did.
+export function codexLaunchArguments(
+  clientSocketPath: string,
+  launchDirectory: string,
+  arguments_: readonly string[],
+): string[] {
+  const directoryOverridden = arguments_.some(
+    (argument) => argument === "--cd" || argument === "-C" || argument.startsWith("--cd="),
+  );
+  return [
+    "--remote",
+    `unix://${clientSocketPath}`,
+    ...(directoryOverridden ? [] : ["--cd", launchDirectory]),
+    ...arguments_,
+  ];
+}
+
 export async function runManagedCodex(
   paths: ApplicationPaths,
   arguments_: readonly string[],
 ): Promise<number> {
   const child = Bun.spawn(
-    ["codex", "--remote", `unix://${paths.codexClientSocket}`, ...arguments_],
+    ["codex", ...codexLaunchArguments(paths.codexClientSocket, process.cwd(), arguments_)],
     {
       env: { ...process.env, CODEX_HOME: paths.codexHome },
       stdin: "inherit",
