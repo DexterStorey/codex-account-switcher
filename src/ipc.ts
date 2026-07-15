@@ -1,8 +1,8 @@
 import { chmod, rm } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { z } from "zod";
-import type { DashboardSnapshot, ProviderId } from "./domain.ts";
-import { DashboardSnapshotSchema, ProviderIdSchema } from "./domain.ts";
+import type { Account, DashboardSnapshot, ProviderId } from "./domain.ts";
+import { AccountSchema, DashboardSnapshotSchema, ProviderIdSchema } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
 import type { AccountManager } from "./manager.ts";
 
@@ -42,6 +42,15 @@ const PolicyParamsSchema = z
   })
   .strict();
 
+const ReplaceCredentialParamsSchema = z
+  .object({
+    account: AccountSchema,
+    removePrevious: z
+      .object({ secretReference: z.string().nullable(), profilePath: z.string().nullable() })
+      .strict(),
+  })
+  .strict();
+
 export interface ManagerServer {
   close(): Promise<void>;
   finished: Promise<void>;
@@ -74,6 +83,11 @@ async function dispatch(
     case "policy/set": {
       const parsed = PolicyParamsSchema.parse(params);
       return manager.setAutomationPolicy(parsed);
+    }
+    case "account/replace": {
+      const parsed = ReplaceCredentialParamsSchema.parse(params);
+      await manager.replaceAccountCredential(parsed);
+      return { replaced: true };
     }
     default:
       throw new ApplicationError("METHOD_NOT_FOUND", `Unknown manager method ${method}`);
@@ -256,4 +270,18 @@ export function readProxyPort(socketPath: string): Promise<number> {
     schema: z.object({ port: z.number().int().positive() }),
     timeoutMilliseconds: 15_000,
   }).then((result) => result.port);
+}
+
+export function requestAccountReplace(
+  socketPath: string,
+  account: Account,
+  removePrevious: { secretReference: string | null; profilePath: string | null },
+): Promise<void> {
+  return managerRequest({
+    socketPath,
+    method: "account/replace",
+    params: { account, removePrevious },
+    schema: z.object({ replaced: z.literal(true) }),
+    timeoutMilliseconds: 15_000,
+  }).then(() => undefined);
 }

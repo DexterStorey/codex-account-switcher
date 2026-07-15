@@ -1,10 +1,13 @@
 # tokmax
 
-A local account, quota, and runtime control plane for Codex and Claude Code.
+A local account, quota, and auth-injecting proxy for Codex and Claude Code.
 
-It registers subscription accounts without touching live sessions, keeps credentials in the macOS
-Keychain, displays every account's current usage windows, and switches managed runtimes only at a
-safe request boundary.
+It registers subscription accounts, keeps their credentials in the macOS Keychain, and displays every
+account's current usage windows. Native Codex and Claude Code point their API traffic at a loopback
+proxy that forwards each request to the real provider and injects the active account's credential.
+Because the active account is read per request, switching accounts takes effect on the very next
+request — including one sent mid-turn — and the clients themselves run unmodified against their real
+`~/.codex` and `~/.claude`.
 
 ```text
 tokmax · 9:42 AM · 2 codex · 1 claude
@@ -21,6 +24,8 @@ Anthropic · Claude Code                    auto-rotate off · gen 1
   ● dexter2@example.com                        active
       5h session           ████░░░░░░░░░░░░   27% · resets 2h 5m
       7 day · all models   █░░░░░░░░░░░░░░░    5% · resets 6d 18h
+
+● active — every request uses it · q quit · r refresh · tokmax --help
 ```
 
 ## What is actually managed
@@ -30,14 +35,15 @@ There are two independent axes:
 - **Provider accounts:** OpenAI and Anthropic.
 - **Runtime clients:** Codex CLI and Claude Code.
 
-The manager intentionally controls only processes launched through its wrappers:
+tokmax never touches a running process. It changes only which credential the proxy injects, so a switch
+is a local state update that the next request picks up. After `tokmax install`, plain `codex` and
+`claude` route through the proxy; the wrappers do the same per launch and auto-select an account when
+none is active:
 
 ```bash
 tokmax codex
 tokmax claude
 ```
-
-Existing unmanaged processes stay outside the control plane. They are never killed or rewritten.
 
 ## Requirements
 
@@ -73,7 +79,6 @@ tokmax claude login --email dexter@example.com
 tokmax claude login
 
 # Repair an expired/revoked login without changing its stable account ID.
-tokmax daemon stop
 tokmax codex relogin dexter@example.com
 tokmax claude relogin dexter@example.com
 
@@ -82,48 +87,59 @@ tokmax list
 
 Each account is named by the verified email returned after login. The optional Claude `--email`
 value only pre-fills the provider login; it never overrides the verified identity.
-Reauthentication intentionally requires a stopped manager and no live managed sessions. This keeps
-the old credential durable until the isolated replacement has been verified and committed.
+Reauthentication pauses the manager for the swap and restarts it afterward, keeping the old credential
+durable until the isolated replacement has been verified and committed.
 
 Codex credentials are imported into this application's Keychain service and the temporary login home
 is deleted. Claude credentials remain in Claude Code's own per-`CLAUDE_CONFIG_DIR` Keychain profiles
-(or Claude's mode-`0600` fallback when Keychain is unavailable).
+(or Claude's mode-`0600` fallback when Keychain is unavailable); those isolated profiles are used only
+as credential stores, never for running sessions.
 SQLite contains identities, health, usage, and opaque secret references—never tokens.
 
-## Select an account and launch managed clients
+## tokmax install
+
+```bash
+tokmax install
+```
+
+`tokmax install` writes the proxy settings into your real client config so plain `codex` and `claude`
+route through tokmax:
+
+- `~/.codex/config.toml` gains a restorable managed block (delimited by `# >>> tokmax managed`) that
+  adds a `tokmax` model provider whose `base_url` points at the proxy with `wire_api = "responses"`.
+- `~/.claude/settings.json` gains an `env` block that sets `ANTHROPIC_BASE_URL` to the proxy and
+  `ANTHROPIC_AUTH_TOKEN` to a placeholder. The real OAuth token is injected server-side by the proxy;
+  the placeholder only satisfies the client's need for a value.
+
+`tokmax uninstall` restores both files exactly. Install is optional: the `tokmax codex` and
+`tokmax claude` wrappers apply the same routing per launch.
+
+## Select an account and launch
 
 ```bash
 tokmax switch codex dexter@example.com
 tokmax switch claude dexter@example.com
 
+# with config installed:
+codex
+claude
+
+# or per-launch, auto-selecting an account when none is active:
 tokmax codex
 tokmax claude
 ```
 
-Launching a managed client with no active account selects one automatically —
-healthy accounts first, lowest usage pressure wins — and prints the choice.
-Managed Claude sessions inherit your own `~/.claude` configuration (settings,
-skills, agents, memory, project history) through symlinks in the managed
-profile; credentials and OAuth identity metadata never cross profiles. A
-switch drains managed sessions for up to 60 seconds and refuses rather than
-interrupting a running turn; if the manager daemon is unreachable, managed
-sessions keep working without the switch boundary instead of blocking prompts.
+Launching through a wrapper with no active account selects one automatically — healthy accounts first,
+lowest usage pressure wins — and prints the choice. The clients run natively against the real
+`~/.codex` and `~/.claude`, so `codex exec`, `/status`, the working directory, and subagents all behave
+normally.
 
-Switching is transactional:
-
-1. Refresh and validate the target credential.
-2. Wait for managed sessions to reach an idle boundary.
-3. Activate the target in the provider runtime.
-4. Verify identity and rate limits.
-5. Commit the new generation to SQLite.
-6. Roll back to the prior account if activation or verification fails.
-
-Codex threads stay loaded in a dedicated app-server. The managed provider forces HTTP Responses
-transport so the next turn reads the new auth generation; Codex's default WebSocket transport binds
-auth at the handshake and cannot safely hot-switch. A local dispatch gate queues newly submitted Codex
-turns, tracks accepted dispatch RPCs, and requires stable idle samples before activation. Claude Code
-sessions use one managed active `CLAUDE_CONFIG_DIR`; wrapper-owned `UserPromptSubmit`, `Stop`, and
-session hooks form the cooperative request boundary.
+`tokmax switch` is near-instant (~2s, dominated by a single verification probe of the target
+credential). It probes the target to confirm the credential is usable, then commits the new active
+account and generation to SQLite. Because the proxy reads the active account per request, the change
+applies on the very next request — including one sent mid-turn — with no drain, activation, or client
+restart. On a `401` the proxy performs one reactive credential refresh and replays the request, so a
+token that expires between probes never surfaces to the client.
 
 ## Dashboard and automation
 
@@ -164,7 +180,7 @@ A failed or expired reading is `unknown`, never `0%`.
 
 ## Daemon commands
 
-The dashboard and managed wrappers start the local daemon when needed.
+The dashboard and wrappers start the local daemon when needed.
 
 ```bash
 tokmax daemon start
@@ -172,31 +188,10 @@ tokmax daemon status
 tokmax daemon stop
 ```
 
-The daemon owns the switching leases, provider probes, and Codex app-server connection. Manager and
-managed-client Unix sockets are mode `0600`. The app-server's private loopback listener requires a
-random capability token held in a mode-`0600` file. State lives under `~/.codex-auth` by default (the pre-rename home is kept because Claude Keychain items are keyed to profile paths); set
-`TOKMAX_HOME` to isolate an installation.
-
-## Why this does not swap auth files
-
-Codex caches credentials in process, rotates refresh tokens, and can keep an authenticated WebSocket
-across turns. Replacing `~/.codex/auth.json` underneath running processes can strand refresh tokens or
-appear to switch while requests continue on the old account. OpenAI documents that Codex caches login
-details in `auth.json` or the OS credential store and refreshes ChatGPT tokens during use.
-[Authentication documentation](https://learn.chatgpt.com/docs/auth#login-caching)
-
-The managed Codex runtime instead uses:
-
-- a dedicated app-server on an authenticated IPv4-loopback endpoint;
-- a mode-`0600` Unix WebSocket gate for managed Codex TUIs;
-- a manager-owned dispatch gate that pauses new turns during a switch;
-- external `chatgptAuthTokens` login;
-- a custom provider with `requires_openai_auth = true`; and
-- `supports_websockets = false`, making the next idle turn the auth boundary.
-
-OpenAI documents custom providers and `requires_openai_auth` in the
-[Codex authentication guide](https://learn.chatgpt.com/docs/auth#alternative-model-providers).
-The app-server account methods are experimental, so they remain isolated behind a compatibility adapter.
+The daemon runs the local proxy and the periodic usage/health probes; the proxy binds only
+`127.0.0.1:8459` (override with `TOKMAX_PROXY_PORT`). Its Unix control socket is mode `0600`. State
+lives under `~/.codex-auth` by default (the pre-rename home is kept because Claude Keychain items are
+keyed to profile paths); set `TOKMAX_HOME` to isolate an installation.
 
 ## Rate-limit sources
 

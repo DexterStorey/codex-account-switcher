@@ -19,6 +19,7 @@ import {
   managerRequest,
   readDashboard,
   readProxyPort,
+  requestAccountReplace,
   requestSwitch,
   startManagerServer,
 } from "./ipc.ts";
@@ -386,91 +387,50 @@ async function reauthenticateAccount(
     throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> relogin <email-or-id>");
   }
   const provider = providerFromCli(providerArgument);
-  // Relogin owns the daemon lifecycle instead of telling the user to.
-  const managerWasRunning = await managerAvailable(context.paths.managerSocket);
-  if (managerWasRunning) {
-    process.stdout.write("Pausing the manager for relogin…\n");
-    await stopDaemon(context);
+  // Relogin is fully online: the daemon keeps hosting the proxy the whole time,
+  // so running sessions and the dashboard never drop. The interactive login
+  // runs here (it needs the terminal); the daemon performs the store swap.
+  await ensureDaemon(context);
+  const existing = resolveAccount(context.store, provider, accountReference);
+  if (existing.externalAccountId === null) {
+    throw new ApplicationError(
+      "IDENTITY_UNBOUND",
+      `${existing.label} has no stable provider identity and must be registered again`,
+    );
   }
-  const lock = await acquireDaemonLock(context.paths.managerLock);
+  const registration = parseRegistrationOptions(provider, arguments_.slice(2));
+  const authenticated = await registerIsolatedAccount(context, provider, registration.email);
+  if (
+    authenticated.externalAccountId !== existing.externalAccountId ||
+    (existing.provider === "openai" &&
+      existing.externalUserId !== null &&
+      authenticated.provider === "openai" &&
+      authenticated.externalUserId !== existing.externalUserId)
+  ) {
+    await removeUnstoredAccount(authenticated);
+    throw new ApplicationError(
+      "IDENTITY_CHANGED",
+      `Login belongs to a different ${providerArgument} account than ${existing.label}`,
+    );
+  }
+  const replacement: Account = {
+    ...authenticated,
+    id: existing.id,
+    enabled: existing.enabled,
+    createdAt: existing.createdAt,
+  };
   try {
-    // Live sessions only matter when they ride the credential being replaced;
-    // refreshing a non-active account never touches the active profile.
-    const activeAccountId = context.store.findProviderState(provider).activeAccountId;
-    const target = resolveAccount(context.store, provider, accountReference);
-    if (target.id === activeAccountId) {
-      const liveSession = context.store.listRuntimeSessions().find((session) => {
-        if (session.provider !== provider) {
-          return false;
-        }
-        try {
-          process.kill(session.processId, 0);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      if (liveSession !== undefined) {
-        throw new ApplicationError(
-          "SESSIONS_RUNNING",
-          `${target.label} is the active ${providerArgument} account and managed ${liveSession.client} process ${liveSession.processId} is still using it; close it or switch first`,
-        );
-      }
-    }
-    const existing = resolveAccount(context.store, provider, accountReference);
-    if (existing.externalAccountId === null) {
-      throw new ApplicationError(
-        "IDENTITY_UNBOUND",
-        `${existing.label} has no stable provider identity and must be registered again`,
-      );
-    }
-    const registration = parseRegistrationOptions(provider, arguments_.slice(2));
-    const authenticated = await registerIsolatedAccount(context, provider, registration.email);
-    if (
-      authenticated.externalAccountId !== existing.externalAccountId ||
-      (existing.provider === "openai" &&
-        existing.externalUserId !== null &&
-        authenticated.provider === "openai" &&
-        authenticated.externalUserId !== existing.externalUserId)
-    ) {
-      await removeUnstoredAccount(authenticated);
-      throw new ApplicationError(
-        "IDENTITY_CHANGED",
-        `Login belongs to a different ${providerArgument} account than ${existing.label}`,
-      );
-    }
-    const replacement: Account = {
-      ...authenticated,
-      id: existing.id,
-      enabled: existing.enabled,
-      createdAt: existing.createdAt,
-    };
-    try {
-      context.store.saveAccount(replacement);
-    } catch (error) {
-      await removeUnstoredAccount(authenticated);
-      throw error;
-    }
-    try {
-      await removeUnstoredAccount(existing);
-    } catch (error) {
-      process.stderr.write(
-        `warning: reauthentication succeeded but the prior credential could not be removed: ${errorMessage(error)}\n`,
-      );
-    }
-    process.stdout.write(`Reauthenticated ${providerArgument} account ${replacement.label}.\n`);
-  } finally {
-    await lock.release();
-    if (managerWasRunning) {
-      await startDaemon(context).then(
-        () => process.stdout.write("Manager resumed.\n"),
-        (error) =>
-          process.stderr.write(
-            `warning: manager did not restart (${errorMessage(error)}); run tokmax daemon start\n`,
-          ),
-      );
-    }
+    await requestAccountReplace(context.paths.managerSocket, replacement, {
+      secretReference: existing.secretReference,
+      profilePath: existing.profilePath,
+    });
+  } catch (error) {
+    await removeUnstoredAccount(authenticated);
+    throw error;
   }
+  process.stdout.write(
+    `Reauthenticated ${providerArgument} account ${replacement.label}; live sessions pick it up on their next request.\n`,
+  );
 }
 
 function resolveAccount(

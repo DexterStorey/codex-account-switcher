@@ -98,9 +98,21 @@ export function createRuntimeCredentialSource(
     if (account === null) {
       return null;
     }
-    return provider === "openai"
-      ? openAiInjection(account, forceRefresh)
-      : anthropicInjection(account, forceRefresh);
+    try {
+      return provider === "openai"
+        ? await openAiInjection(account, forceRefresh)
+        : await anthropicInjection(account, forceRefresh);
+    } catch (error) {
+      // The active credential is unusable (expired refresh token, revoked
+      // login). Surface one actionable line instead of the raw failure so a
+      // client shows the fix rather than a stack.
+      const cli = provider === "openai" ? "codex" : "claude";
+      throw new ApplicationError(
+        "ACTIVE_CREDENTIAL_UNUSABLE",
+        `${account.label} needs re-login — run: tokmax ${cli} relogin ${account.label}`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
   }
 
   return {

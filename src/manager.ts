@@ -7,6 +7,7 @@ import {
 import { ApplicationError, errorMessage } from "./errors.ts";
 import type { FetchImplementation } from "./http.ts";
 import type { ApplicationPaths } from "./paths.ts";
+import { removeClaudeProfile } from "./providers/claude/auth.ts";
 import { AnthropicProviderAdapter } from "./providers/claude/provider.ts";
 import type { CredentialVault } from "./providers/codex/auth.ts";
 import { OpenAiProviderAdapter } from "./providers/codex/provider.ts";
@@ -139,6 +140,26 @@ export class AccountManager {
   public activeAccount(provider: ProviderId): Account | null {
     const accountId = this.#store.findProviderState(provider).activeAccountId;
     return accountId === null ? null : this.#store.findAccount(accountId);
+  }
+
+  // Relogin performs the interactive login in the CLI, then hands the fresh
+  // credential here so the daemon stays the single store writer and the proxy
+  // reads the new credential on the next request — no restart, no dropped
+  // sessions. The old profile/keychain item is removed only after the swap.
+  public async replaceAccountCredential(input: {
+    account: Account;
+    removePrevious: { secretReference: string | null; profilePath: string | null };
+  }): Promise<void> {
+    return this.withProviderOperation(input.account.provider, async () => {
+      this.#store.saveAccount(input.account);
+      const { secretReference, profilePath } = input.removePrevious;
+      if (secretReference !== null && secretReference !== input.account.secretReference) {
+        await this.#vault.remove(secretReference).catch(() => undefined);
+      }
+      if (profilePath !== null && profilePath !== input.account.profilePath) {
+        await removeClaudeProfile(profilePath).catch(() => undefined);
+      }
+    });
   }
 
   public setAutomationPolicy(input: {

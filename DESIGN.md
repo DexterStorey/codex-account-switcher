@@ -23,16 +23,20 @@ Provider accounts                      Runtime clients
 | --- | --- | --- |
 | `domain.ts` | Canonical Zod schemas and inferred types | None |
 | `storage.ts` | SQLite migrations, validated persistence, atomic commits | Metadata only |
-| `providers/codex` | Login, vault, OAuth refresh, usage, app-server, supervisor | Keychain secret |
-| `providers/claude` | Profile login, credential compatibility, usage, activation | Claude Keychain profile |
+| `proxy.ts` | Loopback HTTP proxy: route by provider, forward upstream, inject auth, replay once on 401 | None |
+| `runtime-source.ts` | Resolve the active account into an upstream + injected headers; refresh on demand | None |
+| `config-install.ts` | Write and restore the managed blocks in `~/.codex` and `~/.claude` | Client config |
+| `providers/codex` | Login, vault, OAuth refresh, usage probe | Keychain secret |
+| `providers/claude` | Profile login, credential compatibility, usage probe | Claude Keychain profile |
 | `selection.ts` | Pure deterministic rotation decision | None |
-| `manager.ts` | Probe scheduling and switch transaction orchestration | Via storage |
+| `manager.ts` | Proxy lifecycle, probe scheduling, switch commit | Via storage |
 | `ipc.ts` | Strict local request boundary | Unix socket only |
 | `ui.ts` | Read-only terminal projection | None |
 | `cli.ts` | Command parsing and composition | None |
 
-Provider-specific response shapes never cross into application code. Each adapter validates its input
-and emits an `Account`, `UsageSnapshot`, or explicit application error.
+The provider adapters are now probe-only: they read usage and health, and no longer activate or drain a
+runtime. Provider-specific response shapes never cross into application code. Each adapter validates its
+input and emits an `Account`, `UsageSnapshot`, or explicit application error.
 
 ## Durable state
 
@@ -66,95 +70,65 @@ Registration runs `codex login` with a temporary `CODEX_HOME`. The resulting `au
 validated, its account identity is read from JWT claims, and the credential is moved into a dedicated
 macOS Keychain item. The temporary directory is then deleted.
 
-The manager is the only refresh owner. Refreshes are serialized per Keychain reference so two probes
-cannot submit the same rotating refresh token concurrently. An account-ID change after refresh fails
-closed.
+The daemon is the only refresh owner. Refreshes are serialized per Keychain reference so no two callers
+— a probe and a proxy request, or two probes — can submit the same rotating refresh token concurrently.
+An account-ID change after refresh fails closed.
 
 ### Anthropic
 
-Each account owns a canonical isolated `CLAUDE_CONFIG_DIR`. Claude Code owns the corresponding Keychain
-item and any refresh-token mutation. The manager reads the current implementation's credential payload
-only through a versioned adapter, and asks the official CLI to refresh or project it into the stable
-managed active profile.
+Each account owns a canonical isolated `CLAUDE_CONFIG_DIR` under `~/.codex-auth/profiles/claude`, used
+only as a credential store and never for a running session. Claude Code owns the corresponding Keychain
+item and its credential format. The proxy and the probes read that profile's credential through a
+versioned adapter and, when it is near expiry or rejected, refresh it in place; the rotated token is
+written straight back to the same profile. There is no separate active-profile slot to keep in sync.
 
-The active Claude profile is a lease. A profile credential may rotate while leased, so activation and
-refresh never copy a stale saved blob over the active slot.
+## Switching
 
-## Switching transaction
+A switch is a validated state update, not a runtime handoff. The proxy reads the active account per
+request, so pointing every subsequent request at the target is all a switch has to do.
 
-Every provider switch follows one state machine:
+1. Resolve the target: it must be an enabled account of the requested provider.
+2. If it is not already active, probe it once — read the credential, refresh if stale, and verify live
+   authorization — so a switch never commits to an unusable account.
+3. Atomically commit the `committed` switch record together with the new provider state (active account
+   plus the next generation) to SQLite.
 
-```text
-prepared → draining → synchronizing → activating → verifying → committed
-                              │             │              │
-                              └────── failure ──────────────┴──▶ rolledBack | failed
-```
+The commit is serialized per provider behind the same operation queue as the probes, so a switch and an
+in-flight probe cannot interleave. There is no drain, activation, rollback, or lease: the previous
+account simply stops being injected once the store is updated, and the change is visible on the very
+next request — including one sent mid-turn. A switch is near-instant (~2s, dominated by the single
+verification probe).
 
-The provider switching lease is acquired before `prepared` and released only after a terminal journal
-entry.
+## Runtime credential injection
 
-1. Resolve one enabled target account of the correct provider.
-2. Refresh its credential and obtain a fresh usage snapshot.
-3. Journal `prepared` with the next generation.
-4. Drain every managed session to a request boundary.
-5. Persist any rotating credential held by the active runtime back to its source profile.
-6. Activate the target credential.
-7. Re-fetch usage to verify live authorization.
-8. Atomically commit both the `committed` journal record and provider state.
-9. If anything fails after activation begins, preserve the target lease, project the source account
-   again, and journal the outcome.
+The native clients run unmodified; only their API base URL is redirected at tokmax. A local HTTP proxy
+listens on `127.0.0.1:8459` (configurable via `TOKMAX_PROXY_PORT`) and exposes one path prefix per
+provider — `/openai` and `/anthropic`. For each request it:
 
-No normal switch interrupts a response or a running tool. A 60-second drain timeout returns
-`SESSIONS_BUSY` and leaves the current account selected. OpenAI switches skip the drain entirely —
-the HTTP Responses transport pins an in-flight turn to the token it started with while the dispatch
-gate queues new turns, so only Anthropic switches wait for idle.
+1. Reads the provider's active account from the store — per request, so the newest committed generation
+   always wins, even for a request sent mid-turn.
+2. Forwards the request to the real upstream: `/openai` to `https://chatgpt.com/backend-api/codex`,
+   `/anthropic` to `https://api.anthropic.com`.
+3. Injects the active account's credential. For OpenAI it sets `Authorization: Bearer <access token>`
+   and `chatgpt-account-id`. For Anthropic it sets `Authorization: Bearer <OAuth access token>`, appends
+   `anthropic-beta: oauth-2025-04-20` to the client's own betas, and strips any `x-api-key` so the
+   injected bearer wins.
+4. On a `401` — a token that expired between refresh cycles — it refreshes the active credential once
+   and replays the identical request, so the client never sees the transient failure.
 
-## Codex continuity
+`config-install.ts` wires the clients to the proxy by editing their real config inside restorable
+managed blocks. Codex gets a `tokmax` model provider in `~/.codex/config.toml` (`base_url` at `/openai`,
+`wire_api = "responses"`); Claude Code gets `ANTHROPIC_BASE_URL` and a placeholder `ANTHROPIC_AUTH_TOKEN`
+in `~/.claude/settings.json`. `tokmax uninstall` restores both. The `tokmax codex` and `tokmax claude`
+wrappers pass the same settings per launch, so they work whether or not the config is installed.
 
-The built-in Codex provider supports Responses WebSockets. A WebSocket carries auth at its handshake and
-is reused across turns, so updating auth alone does not guarantee that an existing thread changes
-account.
+Because there is no app-server, no isolated running profile, no hooks, and no settings mirroring, the
+clients behave exactly as they do natively: `codex exec`, `/status`, the working directory, and
+subagents all work.
 
-The supervised app-server is launched with:
-
-```toml
-model_provider = "openai-http"
-
-[model_providers.openai-http]
-name = "OpenAI"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = false
-```
-
-Managed Codex TUIs connect to a manager-owned mode-`0600` Unix WebSocket gate. The native app-server
-binds an ephemeral IPv4-loopback port protected by a random capability token in a mode-`0600` file.
-The gate terminates the client WebSocket, forwards control traffic, queues model-dispatch RPCs during a
-generation change, and tracks accepted turns until their terminal notifications. Thread start, resume,
-and fork requests are forced to `openai-http`; downstream login/logout methods are rejected. The
-coordinator also verifies that every loaded thread uses the managed provider and that none is active.
-Threads remain loaded and their local rollout history remains intact. After active threads drain, the
-manager installs external `chatgptAuthTokens`, verifies the app-server email, and lets the queued next
-turn resolve the new in-process auth over HTTP. Refresh callbacks use the adapter's projected account,
-not the still-uncommitted database account, so activation cannot create hybrid auth.
-
-Existing threads created outside this provider profile are not silently adopted. They need a one-time
-explicit drain and resume under the managed runtime.
-
-## Claude continuity
-
-Managed Claude processes all start with the same stable active `CLAUDE_CONFIG_DIR`. Each wrapper writes
-a unique mode-`0600` hook settings file and restricts settings to that profile. `UserPromptSubmit` waits for any switch
-barrier and marks the session working before the prompt can dispatch; `Stop`, `StopFailure`, and
-`SessionEnd` drain or remove it. Background agents are also checked with `claude agents --json`. The
-manager then invokes Claude's documented refresh-token login environment variables to project the target
-into the active profile. Every rotating-credential copy first verifies the live upstream identity.
-
-Arguments that disable or replace the managed hook/settings boundary (`--bare`, `--safe-mode`,
-`--settings`, `--setting-sources`, `--plugin-dir`, and background-agent flags) are rejected by the
-managed wrapper.
-
-This handoff is version-gated because Claude exposes no public account-switch RPC.
+The credential source (`runtime-source.ts`) reuses the same vault, profile reader, and refresh paths the
+probes use, so each credential still has exactly one refresh owner. A token near expiry is refreshed
+proactively before injection; a rejected one triggers the single reactive refresh above.
 
 ## Usage and health
 
@@ -203,21 +177,23 @@ provider reports a hard limit. Candidates must be enabled, healthy, fresh, below
 pressure ascending → account ID ascending
 ```
 
-The pure selector returns a decision; it performs no I/O. The transaction coordinator decides whether
-and when that decision may be enacted.
+The pure selector returns a decision; it performs no I/O. The manager decides whether and when that
+decision is enacted as a switch commit.
 
 ## Failure behavior
 
 - Invalid provider JSON: fail the probe, retain the previous snapshot as visibly stale.
-- 401 with refreshable auth: serialize refresh, persist the rotated token, retry once.
+- 401 with refreshable auth: serialize refresh, persist the rotated token, retry once — on the probe
+  path and, for a live client request, once inside the proxy before replaying.
 - Authoritative refresh rejection: mark `reauthenticationRequired`.
 - Network or timeout: mark `temporarilyUnreachable`.
 - Usage 429: mark `usageRateLimited` and exclude from auto-selection.
-- App-server disconnect: fail the switch; never fall back to auth-file replacement.
-- Busy sessions: leave the current account and journal the failure.
-- Process crash during switch: startup reads the last non-terminal journal entry, preserves a known
-  target credential lease, reasserts the committed source when safe, and records `rolledBack` or
-  `failed` instead of guessing that the switch committed.
+- Target probe fails during a switch: refuse the switch, leave the current account active, and surface
+  the error; nothing is committed.
+- No active account or unreachable upstream: the proxy returns an explicit `503` or `502` to the client
+  rather than silently sending the request on the wrong account.
+- Process crash: a switch is a single atomic commit, so startup finds either the prior or the new active
+  account — never a half-applied handoff to reconcile.
 
 ## Non-goals
 
