@@ -1,15 +1,21 @@
 import { Box, createCliRenderer, parseColor, type RGBA, Text } from "@opentui/core";
-import type { AnalyticsSnapshot, ProviderId, ProviderState, UsageHistory } from "../domain.ts";
+import type {
+  Account,
+  AnalyticsSnapshot,
+  ProviderId,
+  ProviderState,
+  UsageWindow,
+} from "../domain.ts";
 import { readAnalytics, refreshAnalytics, requestPolicy, requestSwitch } from "../ipc.ts";
 import {
   detectThemeName,
   healthBadge,
+  historyChart,
   meter,
   percentLabel,
   pressureColor,
   resetLabel,
   shortWindow,
-  sparkline,
   type Theme,
   type ThemeName,
   themes,
@@ -26,12 +32,7 @@ function rgb(hex: string): RGBA {
   return value;
 }
 
-// Fixed column widths keep every window row aligned regardless of content, so
-// the layout never ragged-wraps or overlaps.
-const meterWidth = 12;
-const sparkWidth = 10;
-const labelWidth = 34;
-
+const labelWidth = 26;
 const providerTitles: Record<ProviderId, string> = {
   openai: "OpenAI · Codex",
   anthropic: "Anthropic · Claude Code",
@@ -67,158 +68,95 @@ function orderedRows(analytics: AnalyticsSnapshot): Row[] {
   return rows;
 }
 
-interface Render {
+interface Ctx {
   theme: Theme;
 }
 
-function windowRow(
-  ctx: Render,
-  label: string,
-  usedPercent: number | null,
-  resetAt: string | null,
-  history: UsageHistory | undefined,
-  nowMillis: number,
-) {
-  const color = pressureColor(ctx.theme, usedPercent);
-  const reset = resetLabel(resetAt, nowMillis);
-  // One row, fixed-width segments, no inter-child gap, so columns line up.
-  return Box(
-    { flexDirection: "row" },
-    Text({ content: `  ${pad(shortWindow(label), 7)} `, fg: rgb(ctx.theme.dim) }),
-    Text({
-      content: `${meter(usedPercent, meterWidth)} ${percentLabel(usedPercent)}  `,
-      fg: rgb(color),
-    }),
-    Text({
-      content: `${sparkline(history?.points ?? [], sparkWidth)}  `,
-      fg: rgb(ctx.theme.faint),
-    }),
-    Text({ content: reset === "" ? "" : `↺ ${reset}`, fg: rgb(ctx.theme.dim) }),
-  );
-}
-
-// Each account is one compact line; the selected account expands to show all
-// of its windows with sparklines. This keeps the whole dashboard within a
-// normal terminal height regardless of account count.
-function accountCard(
-  ctx: Render,
-  analytics: AnalyticsSnapshot,
-  row: Row,
+// One account line showing every window inline, each colored by its pressure,
+// so all rates are visible at a glance without expanding anything.
+function accountLine(
+  ctx: Ctx,
+  account: Account,
+  windows: readonly UsageWindow[],
   isActive: boolean,
   isSelected: boolean,
-  nowMillis: number,
 ) {
-  const account = analytics.snapshot.accounts.find((a) => a.id === row.accountId);
-  if (account === undefined) {
-    return Box({ width: "100%" });
-  }
-  const usage = analytics.snapshot.usage.find((u) => u.accountId === account.id);
-  const history = analytics.history.find((h) => h.accountId === account.id);
-  const hardWindows = (usage?.windows ?? []).filter((w) => w.kind === "hard");
-  const worst = hardWindows.reduce<{ label: string; usedPercent: number } | null>(
-    (acc, w) =>
-      acc === null || w.usedPercent > acc.usedPercent
-        ? { label: w.label, usedPercent: w.usedPercent }
-        : acc,
-    null,
-  );
   const badge = healthBadge(ctx.theme, account);
-  const summary =
-    worst === null
-      ? Text({ content: usage === undefined ? "—" : "no limit windows", fg: rgb(ctx.theme.dim) })
-      : Box(
-          { flexDirection: "row" },
-          Text({ content: `${pad(shortWindow(worst.label), 6)} `, fg: rgb(ctx.theme.dim) }),
-          Text({
-            content: `${meter(worst.usedPercent, 8)} ${percentLabel(worst.usedPercent)}`,
-            fg: rgb(pressureColor(ctx.theme, worst.usedPercent)),
-          }),
-        );
-  const header = Box(
+  const marker = isActive ? "●" : isSelected ? "▸" : "○";
+  const markerColor = isActive ? ctx.theme.good : isSelected ? ctx.theme.accent : ctx.theme.faint;
+  const children = [
+    Text({ content: ` ${marker} `, fg: rgb(markerColor) }),
+    Text({
+      content: pad(account.label, labelWidth),
+      fg: rgb(isActive || isSelected ? ctx.theme.fg : ctx.theme.dim),
+      attributes: isActive ? 1 : 0,
+    }),
+  ];
+  if (windows.length === 0) {
+    children.push(
+      Text({ content: account.health === "ready" ? "…" : "—", fg: rgb(ctx.theme.dim) }),
+    );
+  }
+  for (const window of windows.slice(0, 3)) {
+    children.push(
+      Text({ content: `${pad(shortWindow(window.label), 5)} `, fg: rgb(ctx.theme.dim) }),
+      Text({
+        content: `${meter(window.usedPercent, 6)} ${percentLabel(window.usedPercent)}  `,
+        fg: rgb(pressureColor(ctx.theme, window.usedPercent)),
+      }),
+    );
+  }
+  if (badge !== null) {
+    children.push(Text({ content: ` ${badge.text}`, fg: rgb(badge.color) }));
+  }
+  return Box(
     {
       flexDirection: "row",
       width: "100%",
       backgroundColor: isSelected ? rgb(ctx.theme.selected) : rgb(ctx.theme.bg),
     },
-    Text({
-      content: ` ${isActive ? "●" : isSelected ? "▸" : "○"} ${pad(account.label, labelWidth)}`,
-      fg: rgb(isActive ? ctx.theme.fg : isSelected ? ctx.theme.fg : ctx.theme.dim),
-      attributes: isActive ? 1 : 0,
-    }),
-    summary,
-    badge === null
-      ? Text({ content: "" })
-      : Text({ content: `  ${badge.text}`, fg: rgb(badge.color) }),
+    ...children,
   );
-  if (!isSelected) {
-    return header;
-  }
-  const windows = (usage?.windows ?? []).map((window) =>
-    windowRow(
-      ctx,
-      window.label,
-      window.usedPercent,
-      window.resetAt,
-      history?.windows.find((h) => h.windowId === window.id),
-      nowMillis,
-    ),
-  );
-  if (windows.length === 0) {
-    windows.push(
-      Box(
-        { flexDirection: "row" },
-        Text({
-          content: account.health === "ready" ? "    gathering usage…" : "    no usage yet",
-          fg: rgb(ctx.theme.dim),
-        }),
-      ),
-    );
-  }
-  return Box(
-    { flexDirection: "column", width: "100%", backgroundColor: rgb(ctx.theme.selected) },
-    header,
-    ...windows,
-  );
-}
-
-function panelTitle(provider: ProviderId, state: ProviderState | undefined): string {
-  const auto = state?.policy.enabled ? `⟳ auto ${state.policy.thresholdPercent}%` : "auto off";
-  return ` ${providerTitles[provider]}   ${auto} · gen ${state?.generation ?? 0} `;
 }
 
 function providerPanel(
-  ctx: Render,
+  ctx: Ctx,
   analytics: AnalyticsSnapshot,
   provider: ProviderId,
   rows: Row[],
   selected: number,
-  nowMillis: number,
 ) {
-  const state = analytics.snapshot.providers.find((s) => s.provider === provider);
+  const state: ProviderState | undefined = analytics.snapshot.providers.find(
+    (s) => s.provider === provider,
+  );
   const providerRows = rows
     .map((row, index) => ({ row, index }))
     .filter((entry) => entry.row.provider === provider);
-  const cards =
+  const lines =
     providerRows.length === 0
       ? [
           Box(
             { flexDirection: "row", width: "100%" },
             Text({
-              content: `  no accounts — tokmax ${providerCli[provider]} login`,
+              content: `   no accounts — tokmax ${providerCli[provider]} login`,
               fg: rgb(ctx.theme.dim),
             }),
           ),
         ]
-      : providerRows.map((entry) =>
-          accountCard(
-            ctx,
-            analytics,
-            entry.row,
-            state?.activeAccountId === entry.row.accountId,
-            entry.index === selected,
-            nowMillis,
-          ),
-        );
+      : providerRows.map((entry) => {
+          const account = analytics.snapshot.accounts.find((a) => a.id === entry.row.accountId);
+          const usage = analytics.snapshot.usage.find((u) => u.accountId === entry.row.accountId);
+          return account === undefined
+            ? Box({ width: "100%" })
+            : accountLine(
+                ctx,
+                account,
+                usage?.windows ?? [],
+                state?.activeAccountId === entry.row.accountId,
+                entry.index === selected,
+              );
+        });
+  const auto = state?.policy.enabled ? `⟳ auto ${state.policy.thresholdPercent}%` : "auto off";
   return Box(
     {
       flexDirection: "column",
@@ -226,28 +164,108 @@ function providerPanel(
       border: true,
       borderStyle: "rounded",
       borderColor: rgb(ctx.theme.border),
-      title: panelTitle(provider, state),
-      titleColor: rgb(ctx.theme.dim),
+      title: ` ${providerTitles[provider]}   ${auto} `,
+      titleColor: rgb(state?.policy.enabled ? ctx.theme.good : ctx.theme.dim),
     },
-    ...cards,
+    ...lines,
   );
 }
 
-function view(
-  ctx: Render,
+// Usage-over-time chart for the selected account's most-pressured hard window.
+function chartPanel(
+  ctx: Ctx,
   analytics: AnalyticsSnapshot,
-  rows: Row[],
-  selected: number,
-  note: string,
-  nowMillis: number,
+  row: Row | undefined,
+  chartHeight: number,
 ) {
-  const clock = new Date(nowMillis).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const account =
+    row === undefined ? undefined : analytics.snapshot.accounts.find((a) => a.id === row.accountId);
+  const history =
+    row === undefined ? undefined : analytics.history.find((h) => h.accountId === row.accountId);
+  const usage =
+    row === undefined
+      ? undefined
+      : analytics.snapshot.usage.find((u) => u.accountId === row.accountId);
+  const worst = (usage?.windows ?? [])
+    .filter((w) => w.kind === "hard")
+    .reduce<UsageWindow | null>(
+      (acc, w) => (acc === null || w.usedPercent > acc.usedPercent ? w : acc),
+      null,
+    );
+  const series =
+    worst === undefined || worst === null
+      ? undefined
+      : history?.windows.find((h) => h.windowId === worst.id);
+  const width = 56;
+  const rows: ReturnType<typeof Box>[] = [];
+  if (account === undefined || worst === null || worst === undefined) {
+    rows.push(
+      Box(
+        { flexDirection: "row" },
+        Text({ content: "   select an account", fg: rgb(ctx.theme.dim) }),
+      ),
+    );
+  } else {
+    const color = pressureColor(ctx.theme, worst.usedPercent);
+    const chart = historyChart(series?.points ?? [], width, chartHeight);
+    chart.forEach((line, index) => {
+      const axis = index === 0 ? "100" : index === chart.length - 1 ? "  0" : "   ";
+      rows.push(
+        Box(
+          { flexDirection: "row" },
+          Text({ content: ` ${axis} `, fg: rgb(ctx.theme.faint) }),
+          Text({ content: line, fg: rgb(color) }),
+        ),
+      );
+    });
+    rows.push(
+      Box(
+        { flexDirection: "row" },
+        Text({ content: `     ${"─".repeat(width)}`, fg: rgb(ctx.theme.faint) }),
+      ),
+      Box(
+        { flexDirection: "row" },
+        Text({ content: `     now ${percentLabel(worst.usedPercent).trim()}`, fg: rgb(color) }),
+        Text({
+          content: `  · resets ${resetLabel(worst.resetAt, Date.now())}`,
+          fg: rgb(ctx.theme.dim),
+        }),
+      ),
+    );
+  }
+  const title =
+    account === undefined || worst === null || worst === undefined
+      ? " usage over time "
+      : ` ${account.label} · ${shortWindow(worst.label)} over time `;
   return Box(
     {
       flexDirection: "column",
+      width: "100%",
+      flexGrow: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: rgb(ctx.theme.border),
+      title,
+      titleColor: rgb(ctx.theme.dim),
+    },
+    ...rows,
+  );
+}
+
+function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], selected: number, note: string) {
+  const clock = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const terminalRows = process.stdout.rows ?? 40;
+  const accountCount = analytics.snapshot.accounts.length;
+  // Reserve rows for the header, both panel frames, the chart frame, and the
+  // footer; give the rest to the chart so the app fills the terminal height.
+  const chartHeight = Math.max(4, Math.min(14, terminalRows - accountCount - 12));
+  return Box(
+    {
+      flexDirection: "column",
+      width: "100%",
+      height: "100%",
       padding: 1,
       gap: 1,
-      width: "100%",
       backgroundColor: rgb(ctx.theme.bg),
     },
     Box(
@@ -258,10 +276,11 @@ function view(
         ? Text({ content: "" })
         : Text({ content: `   ${note}`, fg: rgb(ctx.theme.warn) }),
     ),
-    providerPanel(ctx, analytics, "openai", rows, selected, nowMillis),
-    providerPanel(ctx, analytics, "anthropic", rows, selected, nowMillis),
+    providerPanel(ctx, analytics, "openai", rows, selected),
+    providerPanel(ctx, analytics, "anthropic", rows, selected),
+    chartPanel(ctx, analytics, rows[selected], chartHeight),
     Text({
-      content: "↑↓ select · ⏎ switch · a auto-rotate · t theme · r refresh · q quit",
+      content: "↑↓ select · ⏎ switch · a auto-rotate · r refresh · q quit",
       fg: rgb(ctx.theme.dim),
     }),
   );
@@ -269,27 +288,32 @@ function view(
 
 export async function runTuiDashboard(socketPath: string): Promise<void> {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
-  let themeName: ThemeName = detectThemeName(process.env);
+  // Follow the terminal's own background (OpenTUI queries it), which is the
+  // real signal — not the OS appearance, which can differ from the terminal.
+  // Prime the detection, then re-read it every frame so it stays in sync.
+  await renderer.waitForThemeMode(400).catch(() => null);
+  const envFallback: ThemeName = detectThemeName(process.env);
+  const currentTheme = (): Theme => themes[renderer.themeMode ?? envFallback];
   let analytics = await readAnalytics(socketPath);
   let rows = orderedRows(analytics);
   let selected = 0;
   let note = "";
   let busy = false;
 
-  // Single root child, replaced atomically each paint. Removing a snapshot of
-  // the child list (not the live array) avoids skipping entries mid-iteration,
-  // which previously left stale rows overlapping the new frame.
+  // Build the next frame fully before swapping it in. If a render function
+  // throws, the previous frame stays on screen instead of leaving the cleared
+  // root blank — the white-screen failure mode.
   const paint = () => {
+    let next: ReturnType<typeof Box>;
     try {
-      for (const child of [...renderer.root.getChildren()]) {
-        renderer.root.remove(child);
-      }
-      renderer.root.add(
-        view({ theme: themes[themeName] }, analytics, rows, selected, note, Date.now()),
-      );
+      next = view({ theme: currentTheme() }, analytics, rows, selected, note);
     } catch {
-      // A single bad frame must never tear down the dashboard.
+      return;
     }
+    for (const child of [...renderer.root.getChildren()]) {
+      renderer.root.remove(child);
+    }
+    renderer.root.add(next);
   };
 
   const withBusy = async (message: string, work: () => Promise<void>) => {
@@ -339,7 +363,6 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
     void withBusy(
       `auto-rotate ${providerCli[row.provider]} ${enable ? "on" : "off"}…`,
       async () => {
-        // Pressing the key is the explicit authorization for enabling rotation.
         await requestPolicy(socketPath, {
           provider: row.provider,
           enabled: enable,
@@ -352,7 +375,7 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
   };
 
   await new Promise<void>((resolve) => {
-    const interval = setInterval(() => void reload(false), 2_000);
+    const interval = setInterval(() => void reload(false).catch(() => undefined), 2_000);
     let finished = false;
     const finish = () => {
       if (finished) {
@@ -363,7 +386,7 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
       try {
         renderer.destroy();
       } catch {
-        // Best-effort teardown; the terminal is restored by process exit too.
+        // Best-effort teardown; process exit restores the terminal too.
       }
       resolve();
     };
@@ -380,9 +403,6 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
         switchToSelected();
       } else if (key.name === "a") {
         toggleAuto();
-      } else if (key.name === "t") {
-        themeName = themeName === "dark" ? "light" : "dark";
-        paint();
       } else if (key.name === "r") {
         void reload(true);
       }

@@ -4,6 +4,7 @@ import {
   darkTheme,
   detectThemeName,
   healthBadge,
+  historyChart,
   meter,
   percentLabel,
   resetLabel,
@@ -75,5 +76,19 @@ describe("tui format", () => {
     expect(detectThemeName({ COLORFGBG: "0;15" })).toBe("light");
     expect(detectThemeName({ COLORFGBG: "15;0" })).toBe("dark");
     expect(detectThemeName({})).toBe("dark");
+  });
+
+  test("history chart is fixed-scale, top row first, and right-sized", () => {
+    const points = (pcts: number[]) => pcts.map((usedPercent, at) => ({ at, usedPercent }));
+    const chart = historyChart(points([0, 50, 100]), 3, 2);
+    expect(chart).toHaveLength(2);
+    for (const row of chart) {
+      expect(row).toHaveLength(3);
+    }
+    // Full column reaches the top row; empty column stays blank there.
+    expect(chart[0]?.[2]).toBe("█");
+    expect(chart[0]?.[0]).toBe(" ");
+    // Missing points render as blank columns, not crashes.
+    expect(historyChart([], 4, 3).every((row) => row === "    ")).toBe(true);
   });
 });

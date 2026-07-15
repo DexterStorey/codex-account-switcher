@@ -87,6 +87,35 @@ export function meter(usedPercent: number | null, width = 14): string {
   return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
 }
 
+const eighths = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
+
+// A fixed-scale (0..100) column chart of usage over time, returned top row
+// first. Each of the last `width` points becomes a vertical bar; partial cells
+// use eighth-blocks so the trend reads smoothly.
+export function historyChart(
+  points: readonly UsageHistoryPoint[],
+  width: number,
+  height: number,
+): string[] {
+  const recent = points.slice(-width);
+  const columns = recent.map((point) => (clamp(point.usedPercent) / 100) * height);
+  const rows: string[] = [];
+  for (let row = height - 1; row >= 0; row -= 1) {
+    let line = "";
+    for (let column = 0; column < width; column += 1) {
+      const value = columns[column];
+      if (value === undefined) {
+        line += " ";
+        continue;
+      }
+      const cellEighths = Math.max(0, Math.min(8, Math.round((value - row) * 8)));
+      line += eighths[cellEighths];
+    }
+    rows.push(line);
+  }
+  return rows;
+}
+
 const sparkTicks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
 
 // A fixed-scale (0..100) sparkline so a flat-but-high window reads as high,
