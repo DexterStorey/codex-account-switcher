@@ -1,52 +1,113 @@
-# tokmax
+<div align="center">
 
-A local account, quota, and auth-injecting proxy for Codex and Claude Code.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/brand/logo-light.svg">
+  <img alt="tokmax — a rate-limit control plane for Codex and Claude Code, by Rubric Labs" src="assets/brand/logo-dark.svg" width="460">
+</picture>
 
-It registers subscription accounts, keeps their credentials in the macOS Keychain, and displays every
-account's current usage windows. Native Codex and Claude Code point their API traffic at a loopback
-proxy that forwards each request to the real provider and injects the active account's credential.
-Because the active account is read per request, switching accounts takes effect on the very next
-request — including one sent mid-turn — and the clients themselves run unmodified against their real
-`~/.codex` and `~/.claude`.
+<br/>
+<br/>
 
-```text
-tokmax · 9:42 AM · 2 codex · 1 claude
+**Juggle rate limits across all your Codex and Claude Code accounts.**
+One loopback proxy injects the right account per request — so switching takes effect
+on the very next request, even mid-turn, with the native clients running unmodified.
 
-OpenAI · Codex                             auto-rotate on @95% · gen 4
-  ● dexter@example.com                         active
-      5 hour               ███████████████░   94% · resets 38m
-      7 day                ██████░░░░░░░░░░   38% · resets 4d 6h
-  ○ zero@example.com
-      5 hour               ██░░░░░░░░░░░░░░   12% · resets 3h 12m
-      7 day                ████░░░░░░░░░░░░   24% · resets 5d 1h
+<sub>macOS · [Bun](https://bun.sh) 1.2+ · MIT · a [Rubric Labs](https://rubriclabs.com) project</sub>
 
-Anthropic · Claude Code                    auto-rotate off · gen 1
-  ● dexter2@example.com                        active
-      5h session           ████░░░░░░░░░░░░   27% · resets 2h 5m
-      7 day · all models   █░░░░░░░░░░░░░░░    5% · resets 6d 18h
+<br/>
 
-● active — every request uses it · q quit · r refresh · tokmax --help
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/generated/flagship-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/generated/flagship-light.png">
+  <img alt="tokmax dashboard beside live Claude Code and Codex sessions" src="assets/generated/flagship-dark.png">
+</picture>
+
+</div>
+
+## What it is
+
+You have more than one ChatGPT/Codex and Claude subscription, and you keep hitting the
+five-hour or weekly limit on whichever account you happen to be using. `tokmax` watches
+every account's usage and moves your traffic to whichever one still has headroom.
+
+It manages two independent axes:
+
+- **Provider accounts** — your OpenAI and Anthropic subscriptions.
+- **Runtime clients** — the Codex CLI and Claude Code.
+
+After `tokmax install`, plain `codex` and `claude` route their API traffic through a
+loopback proxy on `127.0.0.1:8459`. The proxy reads the **active account per request** and
+injects that account's credential, so a switch is just a local state update the next
+request picks up — no drain, no restart, no touching a running process. Credentials live in
+the macOS Keychain; SQLite holds only identities, health, usage, and opaque secret
+references — never tokens.
+
+## The dashboard
+
+Run `tokmax` for a live dashboard of every account and its rate-limit windows. Each window
+is colored by pressure — green with headroom, amber getting full, red near the limit.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/generated/accounts-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/generated/accounts-light.png">
+  <img alt="tokmax accounts view" src="assets/generated/accounts-dark.png" width="820">
+</picture>
+
+Press **space** on any account to expand it — plan tier, every window's reset countdown,
+and the account's identity — without leaving the list.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/generated/expanded-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/generated/expanded-light.png">
+  <img alt="expanded account detail" src="assets/generated/expanded-dark.png" width="820">
+</picture>
+
+## Automatic rotation
+
+Turn on auto-rotation and tokmax moves off an account the moment its fullest hard window
+crosses your threshold, onto the eligible account with the most headroom — mid-turn, on the
+next request.
+
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/generated/switch-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/generated/switch-light.gif">
+  <img alt="an at-limit account rotating to a fresh one" src="assets/generated/switch-dark.gif" width="760">
+</picture>
+</div>
+
+```bash
+tokmax auto codex on --threshold 95
+tokmax auto claude on --threshold 95
+tokmax auto both on --threshold 95     # or: off
 ```
 
-## What is actually managed
+The selector is a pure, deterministic function. It:
 
-There are two independent axes:
+- triggers when the active account reaches the threshold in **any** hard window;
+- refuses stale, missing, rate-limited, disabled, or unhealthy candidates;
+- ranks candidates by their worst hard-window pressure, lowest first;
+- applies hysteresis and a minimum dwell time (holds an account ≥ 5 min) to prevent
+  oscillation; and
+- uses account ID as the stable final tie-breaker.
 
-- **Provider accounts:** OpenAI and Anthropic.
-- **Runtime clients:** Codex CLI and Claude Code.
+A failed or expired reading is `unknown`, never `0%`. Automatic rotation is **off by
+default** — enabling it from the CLI is itself your confirmation that your provider permits
+this use of the accounts (see [Provider authorization](#provider-authorization)).
 
-tokmax never touches a running process. It changes only which credential the proxy injects, so a switch
-is a local state update that the next request picks up. After `tokmax install`, plain `codex` and
-`claude` route through the proxy and pick up the active account per request.
+## Analytics
 
-## Requirements
+The Analytics tab charts each provider's usage over time — 1h / 5h / 24h / 7d / 31d — so you
+can see the shape of your consumption, not just a single bar.
 
-- macOS (the initial vault implementation uses Keychain)
-- [Bun](https://bun.sh/) 1.2 or newer
-- Codex CLI and/or Claude Code on `PATH`
-
-The compatibility suite was developed against Codex `0.144.1` and Claude Code `2.1.206`.
-See [COMPATIBILITY.md](./COMPATIBILITY.md) before upgrading those clients.
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/generated/timelapse-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/generated/timelapse-light.gif">
+  <img alt="usage charting over 24 hours" src="assets/generated/timelapse-dark.gif" width="820">
+</picture>
+</div>
 
 ## Install
 
@@ -58,163 +119,118 @@ bun run check
 bun link
 ```
 
-Run `tokmax doctor` to verify the local tools and manager boundary.
+Run `tokmax doctor` to verify the local tools and the manager boundary.
 
-## Register accounts
-
-Each login runs in its own isolated provider home. It does not change the account used by a currently
-running process.
+## Quickstart
 
 ```bash
+# 1. Sign in to each account (isolated login homes; existing sessions untouched)
 tokmax login codex
 tokmax login claude
 
-tokmax list
-```
-
-Each account is named by the verified email returned after login. Re-running `tokmax login` for a
-provider repairs an expired or revoked login in place, without changing its stable account ID.
-Reauthentication pauses the manager for the swap and restarts it afterward, keeping the old credential
-durable until the isolated replacement has been verified and committed.
-
-Codex credentials are imported into this application's Keychain service and the temporary login home
-is deleted. Claude credentials remain in Claude Code's own per-`CLAUDE_CONFIG_DIR` Keychain profiles
-(or Claude's mode-`0600` fallback when Keychain is unavailable); those isolated profiles are used only
-as credential stores, never for running sessions.
-SQLite contains identities, health, usage, and opaque secret references—never tokens.
-
-## tokmax install
-
-```bash
+# 2. Route native codex & claude through tokmax (restorable; undo with uninstall)
 tokmax install
+
+# 3. Use the clients exactly as before — tokmax injects the active account
+codex
+claude
+
+# 4. Switch accounts any time; the next request (even mid-turn) uses the new one
+tokmax switch codex dexter@example.com
 ```
 
-`tokmax install` writes the proxy settings into your real client config so plain `codex` and `claude`
-route through tokmax:
+Each account is named by the verified email returned after login. Re-running `tokmax login`
+repairs an expired login in place without changing the account's stable ID.
 
-- `~/.codex/config.toml` gains a restorable managed block (delimited by `# >>> tokmax managed`) that
-  adds a `tokmax` model provider whose `base_url` points at the proxy with `wire_api = "responses"`.
-- `~/.claude/settings.json` gains an `env` block that sets `ANTHROPIC_BASE_URL` to the proxy and
-  `ANTHROPIC_AUTH_TOKEN` to a placeholder. The real OAuth token is injected server-side by the proxy;
+## Commands
+
+| Command | What it does |
+|---|---|
+| `tokmax` · `tokmax dashboard` | Live dashboard (text render when piped) |
+| `tokmax login <codex\|claude>` | Sign in to a provider; idempotent, re-auths in place |
+| `tokmax install` · `uninstall` | Route native clients through the proxy · restore config |
+| `tokmax list` | Accounts, health, and the active marker |
+| `tokmax switch <codex\|claude> <email-or-id>` | Make an account active (~2s) |
+| `tokmax auto <codex\|claude\|both> <on\|off> [--threshold N]` | Configure auto-rotation (default 95) |
+| `tokmax status` · `refresh` | Machine-readable snapshot · re-probe usage now |
+| `tokmax doctor` | Check tools, proxy, config, and legacy state |
+| `tokmax daemon <start\|stop\|status>` | Manage the local daemon (usually automatic) |
+
+`codex` and `openai` are interchangeable, as are `claude` and `anthropic`.
+
+## How switching works
+
+`tokmax switch` probes the target credential to confirm it is usable, then commits the new
+active account and bumps a generation counter in SQLite. Because the proxy reads the active
+account per request, the change applies on the **very next request** — including one sent
+mid-turn — with no drain, activation, or client restart. On a `401` the proxy performs one
+reactive credential refresh and replays the request, so a token that expires between probes
+never surfaces to the client.
+
+`tokmax install` writes restorable managed blocks into your real client config:
+
+- `~/.codex/config.toml` gains a `tokmax` model provider whose `base_url` points at the
+  proxy (`wire_api = "responses"`), delimited by `# >>> tokmax managed`.
+- `~/.claude/settings.json` gains an `env` block setting `ANTHROPIC_BASE_URL` to the proxy
+  and `ANTHROPIC_AUTH_TOKEN` to a placeholder. The real OAuth token is injected server-side;
   the placeholder only satisfies the client's need for a value.
 
 `tokmax uninstall` restores both files exactly.
 
-## Select an account and launch
-
-```bash
-tokmax switch codex dexter@example.com
-tokmax switch claude dexter@example.com
-
-# after tokmax install, run the native clients directly:
-codex
-claude
-```
-
-The clients run natively against the real `~/.codex` and `~/.claude`, so `codex exec`, `/status`, the
-working directory, and subagents all behave normally.
-
-`tokmax switch` is near-instant (~2s, dominated by a single verification probe of the target
-credential). It probes the target to confirm the credential is usable, then commits the new active
-account and generation to SQLite. Because the proxy reads the active account per request, the change
-applies on the very next request — including one sent mid-turn — with no drain, activation, or client
-restart. On a `401` the proxy performs one reactive credential refresh and replays the request, so a
-token that expires between probes never surfaces to the client.
-
-## Dashboard and automation
-
-Run the live dashboard:
-
-```bash
-tokmax
-```
-
-Or get machine-readable state:
-
-```bash
-tokmax status
-tokmax refresh
-```
-
-Automatic rotation is disabled by default. Enabling it from the CLI is itself your confirmation that
-your provider permits this use of the accounts:
-
-```bash
-tokmax auto codex on --threshold 95
-tokmax auto claude on --threshold 95
-tokmax auto both on --threshold 95
-
-tokmax auto codex off
-tokmax auto claude off
-```
-
-The selector is pure and deterministic. It:
-
-- triggers when the active account reaches the threshold in **any** hard window;
-- refuses stale, missing, rate-limited, disabled, or unhealthy candidates;
-- ranks candidates by their worst hard-window pressure, lowest first;
-- applies hysteresis and minimum dwell time to prevent oscillation; and
-- uses account ID as the stable final tie-breaker.
-
-A failed or expired reading is `unknown`, never `0%`.
-
-## Daemon commands
-
-The dashboard and other tokmax commands start the local daemon when needed.
-
-```bash
-tokmax daemon start
-tokmax daemon status
-tokmax daemon stop
-```
-
-The daemon runs the local proxy and the periodic usage/health probes; the proxy binds only
-`127.0.0.1:8459` (override with `TOKMAX_PROXY_PORT`). Its Unix control socket is mode `0600`. State
-lives under `~/.codex-auth` by default (the pre-rename home is kept because Claude Keychain items are
-keyed to profile paths); set `TOKMAX_HOME` to isolate an installation.
-
 ## Rate-limit sources
 
-- **Codex:** five-hour, weekly, and additional metered windows from the same backend model used by the
-  Codex client. Official Codex pricing confirms a shared five-hour window and that additional weekly
-  limits may apply. [Codex pricing](https://learn.chatgpt.com/docs/pricing#usage-limits)
-- **Claude Code:** five-hour, seven-day, and available model/surface windows from the authenticated
-  usage response.
+- **Codex** — five-hour, weekly, and additional metered windows from the same backend the
+  Codex client uses. ([Codex pricing](https://learn.chatgpt.com/docs/pricing#usage-limits))
+- **Claude Code** — five-hour, seven-day, and per-model/surface windows (e.g. `7 day · Fable`)
+  from the authenticated usage response.
 
-The direct Codex and Claude usage endpoints are compatibility surfaces, not public APIs. Probes are
-strictly parsed, conservatively cached, and fail closed. They may require adapter updates when a provider
-changes its client.
+Only **hard** windows drive rotation pressure. Plan tiers (`Pro`, `Max`, `Max 20×`) are read
+from the provider. These usage endpoints are compatibility surfaces, not public APIs; probes
+are strictly parsed, conservatively cached, and fail closed.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `TOKMAX_HOME` | Relocate/isolate state (default `~/.codex-auth`) |
+| `TOKMAX_PROXY_PORT` | Override the proxy port (default `8459`, loopback only) |
+| `TOKMAX_THEME` | Force `light` or `dark` (else auto-detected) |
+
+The daemon runs the proxy and periodic usage/health probes; its Unix control socket is mode
+`0600`. State lives under `~/.codex-auth` by default — the pre-rename path is kept
+deliberately, because Claude Keychain items are keyed to profile paths.
 
 ## Provider authorization
 
-This is a local orchestration tool, not a way to obtain additional entitlement. Use only accounts you
-own or administer and only where the relevant agreement permits account automation.
+This is a local orchestration tool, not a way to obtain additional entitlement. Use only
+accounts you own or administer, and only where the relevant agreement permits account
+automation. Anthropic currently says Claude.ai OAuth is intended for Anthropic applications
+and restricts third parties from routing subscription credentials without approval.
+([Claude Code legal & compliance](https://code.claude.com/docs/en/legal-and-compliance) ·
+[Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms))
 
-Anthropic currently says Claude.ai OAuth is intended for Anthropic applications and restricts third
-parties from routing subscription credentials without approval.
-[Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance) ·
-[Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
-
-For that reason, the project ships monitoring and manual switching normally, and automatic rotation is
-off by default. Enabling it from the CLI records your confirmation; it is not legal advice or provider
-approval.
+For that reason the project ships monitoring and manual switching normally, and automatic
+rotation is off by default. Enabling it from the CLI records your confirmation; it is not
+legal advice or provider approval.
 
 ## Development
 
 ```bash
-bun run typecheck
-bun run lint
-bun test
-bun run build
+bun run check     # typecheck + lint + test
+bun run build     # bundle to dist/
+bun run assets    # regenerate every screenshot + flagship (see assets/README.md)
 ```
 
-The codebase is TypeScript + Zod 4, Bun SQLite, and Biome. There is no CLI framework and no implicit
-global state: schemas own boundaries, SQLite owns durable transitions, provider adapters own unstable
-integration details, and the selection engine is a pure function.
-
-See [DESIGN.md](./DESIGN.md), [SECURITY.md](./SECURITY.md), and
+TypeScript + Zod 4, Bun SQLite, and Biome. No CLI framework and no hidden global state:
+schemas own boundaries, SQLite owns durable transitions, provider adapters own unstable
+integration details, and the selection engine is a pure function. See
+[DESIGN.md](./DESIGN.md), [SECURITY.md](./SECURITY.md), and
 [COMPATIBILITY.md](./COMPATIBILITY.md) for the detailed contracts.
+
+Every image in this README is generated from source — the real TUI rendered against
+synthetic fixtures with a pinned clock — so it regenerates deterministically. See
+[`assets/`](./assets/README.md) and [`remotion/`](./remotion).
 
 ## License
 
-MIT
+MIT — © Rubric Labs contributors. Built by [Rubric Labs](https://rubriclabs.com).
