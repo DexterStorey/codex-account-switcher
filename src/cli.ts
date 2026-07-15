@@ -77,18 +77,18 @@ function option(arguments_: readonly string[], name: string): string | undefined
 }
 
 function help(): string {
-  return `tokmax — accounts, rate limits, and safe switching for Codex, Claude Code, and Pi
+  return `tokmax — accounts, rate limits, and safe switching for Codex and Claude Code
 
 Accounts
   tokmax codex login                      sign in another OpenAI account
   tokmax claude login [--email a@b.com]   sign in another Anthropic account
   tokmax <codex|claude> relogin <email>   repair an expired login
   tokmax list                             all accounts and their health
+  tokmax whoami                           active account per provider
 
 Sessions
   tokmax codex [arguments...]             launch a managed Codex TUI
   tokmax claude [arguments...]            launch managed Claude Code
-  tokmax pi [arguments...]                launch Pi with safe Codex switching
 
 Limits
   tokmax                                  live dashboard
@@ -114,6 +114,15 @@ async function createContext(): Promise<ApplicationContext> {
 }
 
 async function runDaemon(context: ApplicationContext): Promise<void> {
+  // The daemon must outlive any single failed probe or child process; Bun
+  // exits on unhandled rejections by default, which silently stops all
+  // probing until someone next runs a tokmax command.
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(`unhandled rejection: ${errorMessage(reason)}\n`);
+  });
+  process.on("uncaughtException", (error) => {
+    process.stderr.write(`uncaught exception: ${errorMessage(error)}\n`);
+  });
   const lock = await acquireDaemonLock(context.paths.managerLock);
   try {
     if (await managerAvailable(context.paths.managerSocket)) {
@@ -528,20 +537,25 @@ async function configureAutomation(
   );
 }
 
-async function managedPi(
-  context: ApplicationContext,
-  arguments_: readonly string[],
-): Promise<number> {
-  await ensureActiveProviderAccount(context, "openai", "pi");
-  const builtExtension = join(import.meta.dir, "extensions", "pi.js");
-  const sourceExtension = join(import.meta.dir, "extensions", "pi.ts");
-  const extension = (await Bun.file(builtExtension).exists()) ? builtExtension : sourceExtension;
-  return Bun.spawn(["pi", "--extension", extension, ...arguments_], {
-    env: { ...process.env, TOKMAX_SOCKET: context.paths.managerSocket },
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
+function whoami(context: ApplicationContext): void {
+  const states = new Map(
+    context.store.listProviderStates().map((state) => [state.provider, state]),
+  );
+  const sessions = context.store.listRuntimeSessions();
+  for (const [provider, clientName] of [
+    ["openai", "codex"],
+    ["anthropic", "claude"],
+  ] as const) {
+    const state = states.get(provider);
+    const active =
+      state?.activeAccountId == null ? null : context.store.findAccount(state.activeAccountId);
+    const liveSessions = sessions.filter((session) => session.provider === provider).length;
+    process.stdout.write(
+      `${clientName.padEnd(7)} ${
+        active === null ? "no active account" : `${active.label} (gen ${state?.generation ?? 0})`
+      }${liveSessions === 0 ? "" : ` · ${liveSessions} managed session${liveSessions === 1 ? "" : "s"}`}\n`,
+    );
+  }
 }
 
 async function runClaudeHook(
@@ -623,7 +637,6 @@ async function doctor(context: ApplicationContext): Promise<void> {
     ["bun", "1.2+"],
     ["codex", "0.144.1"],
     ["claude", "2.1.206"],
-    ["pi", "0.80.6"],
   ] as const;
   for (const [tool, testedVersion] of tools) {
     if (Bun.which(tool) === null) {
@@ -741,16 +754,11 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         }
         await ensureActiveProviderAccount(context, "anthropic", "claude");
         return runManagedClaude(context.paths, arguments_.slice(1));
-      case "pi":
-        if (arguments_[1] === "login" || arguments_[1] === "relogin") {
-          throw new ApplicationError(
-            "USAGE",
-            "Pi has no separate account; it uses the selected OpenAI login. Run: tokmax codex login",
-          );
-        }
-        return managedPi(context, arguments_.slice(1));
       case "list":
         listAccounts(context);
+        return 0;
+      case "whoami":
+        whoami(context);
         return 0;
       case "hook":
         if (arguments_[1] !== "claude") {

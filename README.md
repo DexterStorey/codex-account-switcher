@@ -1,15 +1,15 @@
 # tokmax
 
-A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.
+A local account, quota, and runtime control plane for Codex and Claude Code.
 
 It registers subscription accounts without touching live sessions, keeps credentials in the macOS
 Keychain, displays every account's current usage windows, and switches managed runtimes only at a
 safe request boundary.
 
 ```text
-tokmax · 9:42 AM · 1 claude · 2 pi
+tokmax · 9:42 AM · 2 codex · 1 claude
 
-OpenAI · Codex + Pi                        auto-rotate on @95% · gen 4
+OpenAI · Codex                             auto-rotate on @95% · gen 4
   ● dexter@example.com                         active
       5 hour               ███████████████░   94% · resets 38m
       7 day                ██████░░░░░░░░░░   38% · resets 4d 6h
@@ -28,19 +28,13 @@ Anthropic · Claude Code                    auto-rotate off · gen 1
 There are two independent axes:
 
 - **Provider accounts:** OpenAI and Anthropic.
-- **Runtime clients:** Codex CLI, Claude Code, and Pi.
-
-Pi is a client, not a third subscription provider. Pi's `openai-codex` traffic consumes the selected
-OpenAI account's Codex allowance. Pi's Anthropic OAuth usage is currently treated as extra usage by
-Pi, not as Claude Max plan usage, so this project does not pretend that rotating Max accounts extends
-Pi-to-Anthropic runtime.
+- **Runtime clients:** Codex CLI and Claude Code.
 
 The manager intentionally controls only processes launched through its wrappers:
 
 ```bash
 tokmax codex
 tokmax claude
-tokmax pi --model openai-codex/gpt-5.4
 ```
 
 Existing unmanaged processes stay outside the control plane. They are never killed or rewritten.
@@ -49,9 +43,9 @@ Existing unmanaged processes stay outside the control plane. They are never kill
 
 - macOS (the initial vault implementation uses Keychain)
 - [Bun](https://bun.sh/) 1.2 or newer
-- Codex CLI, Claude Code, and/or Pi on `PATH`
+- Codex CLI and/or Claude Code on `PATH`
 
-The compatibility suite was developed against Codex `0.144.1`, Claude Code `2.1.206`, and Pi `0.80.6`.
+The compatibility suite was developed against Codex `0.144.1` and Claude Code `2.1.206`.
 See [COMPATIBILITY.md](./COMPATIBILITY.md) before upgrading those clients.
 
 ## Install
@@ -104,7 +98,6 @@ tokmax switch claude dexter@example.com
 
 tokmax codex
 tokmax claude
-tokmax pi --model openai-codex/gpt-5.4
 ```
 
 Launching a managed client with no active account selects one automatically —
@@ -130,8 +123,7 @@ transport so the next turn reads the new auth generation; Codex's default WebSoc
 auth at the handshake and cannot safely hot-switch. A local dispatch gate queues newly submitted Codex
 turns, tracks accepted dispatch RPCs, and requires stable idle samples before activation. Claude Code
 sessions use one managed active `CLAUDE_CONFIG_DIR`; wrapper-owned `UserPromptSubmit`, `Stop`, and
-session hooks form the cooperative request boundary. Pi marks a turn working before credential lookup,
-then updates the process-local provider credential and closes its cached Codex WebSocket before dispatch.
+session hooks form the cooperative request boundary.
 
 ## Dashboard and automation
 
@@ -182,7 +174,7 @@ tokmax daemon stop
 
 The daemon owns the switching leases, provider probes, and Codex app-server connection. Manager and
 managed-client Unix sockets are mode `0600`. The app-server's private loopback listener requires a
-random capability token held in a mode-`0600` file. State lives under `~/.tokmax` by default; set
+random capability token held in a mode-`0600` file. State lives under `~/.codex-auth` by default (the pre-rename home is kept because Claude Keychain items are keyed to profile paths); set
 `TOKMAX_HOME` to isolate an installation.
 
 ## Why this does not swap auth files
@@ -213,8 +205,6 @@ The app-server account methods are experimental, so they remain isolated behind 
   limits may apply. [Codex pricing](https://learn.chatgpt.com/docs/pricing#usage-limits)
 - **Claude Code:** five-hour, seven-day, and available model/surface windows from the authenticated
   usage response.
-- **Pi:** no separate quota. OpenAI usage is attributed to the selected OpenAI account; Anthropic OAuth
-  spend is not presented as Claude Max utilization.
 
 The direct Codex and Claude usage endpoints are compatibility surfaces, not public APIs. Probes are
 strictly parsed, conservatively cached, and fail closed. They may require adapter updates when a provider

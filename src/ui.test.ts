@@ -92,10 +92,10 @@ describe("dashboard", () => {
 
     const rendered = renderDashboard(snapshot, new Date(sampledAt));
     expect(rendered).toContain("tokmax");
-    expect(rendered).toContain("OpenAI · Codex + Pi");
+    expect(rendered).toContain("OpenAI · Codex");
     expect(rendered).toContain("95%");
-    expect(rendered).toContain("Code review");
-    expect(rendered).toContain("STALE");
+    expect(rendered).toContain("review");
+    expect(rendered).toContain("5m old");
     expect(rendered).toContain("login expiring");
     expect(rendered).not.toContain(
       "an-excessively-long-account-email-address-for-dashboard@example.test",

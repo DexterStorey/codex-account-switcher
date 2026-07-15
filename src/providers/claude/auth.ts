@@ -167,7 +167,27 @@ export function defaultClaudeCredentialReader(
           );
         }
       }
-      return ClaudeCredentialPayloadSchema.parse(JSON.parse(serialized)).claudeAiOauth;
+      // A failed refresh can leave Claude's credential store holding empty
+      // token strings; that is a dead login needing tokmax relogin, not a
+      // schema bug worth a Zod dump in every probe cycle.
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(serialized);
+      } catch (error) {
+        throw new ApplicationError(
+          "CREDENTIAL_MISSING",
+          `Claude profile ${profilePath} holds an unreadable credential`,
+          { cause: error instanceof Error ? error : undefined },
+        );
+      }
+      const parsed = ClaudeCredentialPayloadSchema.safeParse(decoded);
+      if (!parsed.success) {
+        throw new ApplicationError(
+          "CREDENTIAL_MISSING",
+          `Claude profile ${profilePath} holds an unusable credential; sign in again`,
+        );
+      }
+      return parsed.data.claudeAiOauth;
     },
   };
 }

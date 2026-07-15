@@ -8,19 +8,14 @@ The application models provider accounts separately from runtime clients:
 Provider accounts                      Runtime clients
 ┌─────────────────────┐                ┌─────────────────────┐
 │ OpenAI              │───────────────▶│ Codex CLI           │
-│  account A, B, C    │───────────────▶│ Pi / openai-codex   │
-└─────────────────────┘                └─────────────────────┘
+│  account A, B, C    │                └─────────────────────┘
+└─────────────────────┘
 
 ┌─────────────────────┐                ┌─────────────────────┐
 │ Anthropic           │───────────────▶│ Claude Code         │
 │  account D, E, F, G │                └─────────────────────┘
 └─────────────────────┘
-
-Pi / Anthropic OAuth is extra-usage billing and is deliberately outside the
-Claude Max rotation pool.
 ```
-
-This prevents usage from being double-counted and avoids inventing a Pi account or Pi rate limit.
 
 ## Boundaries
 
@@ -30,7 +25,6 @@ This prevents usage from being double-counted and avoids inventing a Pi account 
 | `storage.ts` | SQLite migrations, validated persistence, atomic commits | Metadata only |
 | `providers/codex` | Login, vault, OAuth refresh, usage, app-server, supervisor | Keychain secret |
 | `providers/claude` | Profile login, credential compatibility, usage, activation | Claude Keychain profile |
-| `extensions/pi.ts` | In-process generation handoff and WebSocket reset | None |
 | `selection.ts` | Pure deterministic rotation decision | None |
 | `manager.ts` | Probe scheduling and switch transaction orchestration | Via storage |
 | `ipc.ts` | Strict local request boundary | Unix socket only |
@@ -111,7 +105,9 @@ entry.
    again, and journal the outcome.
 
 No normal switch interrupts a response or a running tool. A 60-second drain timeout returns
-`SESSIONS_BUSY` and leaves the current account selected.
+`SESSIONS_BUSY` and leaves the current account selected. OpenAI switches skip the drain entirely —
+the HTTP Responses transport pins an in-flight turn to the token it started with while the dispatch
+gate queues new turns, so only Anthropic switches wait for idle.
 
 ## Codex continuity
 
@@ -159,20 +155,6 @@ Arguments that disable or replace the managed hook/settings boundary (`--bare`, 
 managed wrapper.
 
 This handoff is version-gated because Claude exposes no public account-switch RPC.
-
-## Pi continuity
-
-Pi loads credentials into process memory and does not hot-reload an externally edited `auth.json`.
-Managed Pi therefore loads a small extension that:
-
-1. marks `turn_start` working synchronously before awaiting the active OpenAI credential;
-2. cooperates at `turn_end`/`turn_start` and outer `agent_settled` boundaries;
-3. closes the session's cached OpenAI Codex WebSocket;
-4. overrides Pi's final `openai-codex` stream boundary so a Pi-stored OAuth token cannot win; and
-5. acknowledges the generation before the next dispatch.
-
-The access token exists only in the manager, Unix-socket response, and Pi process memory. It is never a
-command-line argument.
 
 ## Usage and health
 
@@ -244,4 +226,3 @@ and when that decision may be enacted.
 - Sharing credentials between machines or users.
 - Treating a private usage endpoint as a stable public contract.
 - Circumventing a provider's entitlement, terms, or organizational controls.
-- Claiming Pi has an independent account or quota pool.

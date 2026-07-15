@@ -133,10 +133,11 @@ describe("AccountManager switching", () => {
       usage: usage(candidate),
     }));
     await testHarness.manager.switchAccount("openai", testHarness.target.id, "test");
+    // No "idle" wait for openai: in-flight HTTP turns finish on their original
+    // token and the gate queues new dispatches, so the switch never drains.
     expect(testHarness.calls).toEqual([
       "pause",
       "probe:target@example.com",
-      "idle",
       "sync:source@example.com",
       "activate:target@example.com",
       "probe:target@example.com",
@@ -182,7 +183,6 @@ describe("AccountManager switching", () => {
     await testHarness.manager.switchAccount("openai", testHarness.source.id, "reassert");
     expect(testHarness.calls).toEqual([
       "pause",
-      "idle",
       "activate:source@example.com",
       "probe:source@example.com",
       "resume",
@@ -299,48 +299,6 @@ describe("AccountManager switching", () => {
     ).rejects.toThrow("target verification failed");
     expect(testHarness.calls).not.toContain("resume");
     expect(testHarness.store.listSwitchRecords()[0]?.phase).toBe("failed");
-    testHarness.store.close();
-  });
-
-  test("marks a Pi turn working before awaiting its credential", async () => {
-    const testHarness = await harness(async (candidate) => ({
-      account: candidate,
-      usage: usage(candidate),
-    }));
-    let reportCredentialRead: (() => void) | undefined;
-    let releaseCredential: (() => void) | undefined;
-    const credentialRead = new Promise<void>((resolve) => {
-      reportCredentialRead = resolve;
-    });
-    const credentialReleased = new Promise<void>((resolve) => {
-      releaseCredential = resolve;
-    });
-    testHarness.openai.runtimeCredential = async () => {
-      reportCredentialRead?.();
-      await credentialReleased;
-      return { provider: "openai", accessToken: "access", accountId: "upstream" };
-    };
-
-    const beginning = testHarness.manager.beginPiTurn({
-      upstreamSessionId: "pi-session",
-      processId: process.pid,
-    });
-    await credentialRead;
-    expect(testHarness.store.listRuntimeSessions()[0]?.state).toBe("working");
-    const switching = testHarness.manager.switchAccount("openai", testHarness.target.id, "test");
-    await Bun.sleep(20);
-    expect(testHarness.calls).not.toContain("activate:target@example.com");
-
-    releaseCredential?.();
-    await beginning;
-    testHarness.manager.updatePiSession({
-      upstreamSessionId: "pi-session",
-      processId: process.pid,
-      generation: 1,
-      state: "idle",
-    });
-    await switching;
-    expect(testHarness.calls).toContain("activate:target@example.com");
     testHarness.store.close();
   });
 

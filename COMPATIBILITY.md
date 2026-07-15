@@ -7,7 +7,6 @@ not public APIs. Compatibility is explicit and conservative.
 | --- | ---: | --- | --- |
 | Codex CLI | 0.144.1 | `CODEX_HOME`, login, custom provider config, remote Unix connection | app-server WebSocket/account/thread RPC, direct usage payload |
 | Claude Code | 2.1.206 | `CLAUDE_CONFIG_DIR`, auth commands, command hooks, `agents --json` | Keychain service derivation, credential fields, direct OAuth usage payload, refresh-token handoff behavior |
-| Pi | 0.80.6 | extension lifecycle and provider registration | exported Codex WebSocket reset function |
 
 ## Upgrade checklist
 
@@ -38,13 +37,5 @@ Before updating a native client:
 - The active profile must adopt a refreshed target without `logout` (logout revokes credentials).
 - Every managed foreground session must acknowledge the wrapper-owned turn-boundary hooks.
 - `/api/oauth/usage` utilization remains a fraction in `0..1`; a value outside that range must fail parsing.
-
-## Pi invariants
-
-- External credential-file edits are never used as a hot-switch mechanism.
-- A generation or token change closes the session's cached Codex WebSocket before stream handoff.
-- Manager auth must override Pi auth storage at the final Codex stream boundary.
-- The extension acknowledges only after its in-memory credential changes.
-- Anthropic traffic is not attributed to the Claude Max limit pool.
 
 If any invariant fails, disable switching for that integration until its adapter and tests are updated.

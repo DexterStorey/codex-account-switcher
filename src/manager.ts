@@ -285,41 +285,6 @@ export class AccountManager {
     });
   }
 
-  public async currentPiCredential(): Promise<{
-    provider: "openai";
-    generation: number;
-    accessToken: string;
-    accountId: string;
-  }> {
-    const barrier = this.#providerBarriers.get("openai");
-    if (barrier !== undefined) {
-      await barrier;
-    }
-    return this.readPiCredential();
-  }
-
-  public async beginPiTurn(input: { upstreamSessionId: string; processId: number }): Promise<{
-    provider: "openai";
-    generation: number;
-    accessToken: string;
-    accountId: string;
-  }> {
-    for (;;) {
-      const barrier = this.#providerBarriers.get("openai");
-      if (barrier !== undefined) {
-        await barrier;
-        continue;
-      }
-      const state = this.#store.findProviderState("openai");
-      this.updatePiSession({
-        ...input,
-        generation: state.generation,
-        state: "working",
-      });
-      return this.readPiCredential();
-    }
-  }
-
   public async beginClaudeTurn(input: {
     upstreamSessionId: string;
     processId: number;
@@ -334,44 +299,6 @@ export class AccountManager {
       this.updateClaudeSession({ ...input, generation, state: "working" });
       return { generation };
     }
-  }
-
-  private async readPiCredential(): Promise<{
-    provider: "openai";
-    generation: number;
-    accessToken: string;
-    accountId: string;
-  }> {
-    const state = this.#store.findProviderState("openai");
-    if (state.activeAccountId === null) {
-      throw new ApplicationError("NO_ACTIVE_ACCOUNT", "No OpenAI account is active");
-    }
-    const account = this.#store.findAccount(state.activeAccountId);
-    if (account === null) {
-      throw new ApplicationError("ACCOUNT_NOT_FOUND", "Active OpenAI account no longer exists");
-    }
-    const runtimeCredential = this.#adapters.openai.runtimeCredential;
-    if (runtimeCredential === undefined) {
-      throw new ApplicationError(
-        "RUNTIME_UNSUPPORTED",
-        "OpenAI adapter cannot supply Pi credentials",
-      );
-    }
-    const credential = await runtimeCredential.call(this.#adapters.openai, account);
-    return { ...credential, generation: state.generation };
-  }
-
-  public updatePiSession(input: {
-    upstreamSessionId: string;
-    processId: number;
-    generation: number;
-    state: "idle" | "working";
-  }): void {
-    this.updateRuntimeSession({
-      ...input,
-      client: "pi",
-      provider: "openai",
-    });
   }
 
   public updateClaudeSession(input: {
@@ -406,7 +333,7 @@ export class AccountManager {
     processId: number;
     generation: number;
     state: "idle" | "working";
-    client: "pi" | "claude";
+    client: "claude";
     provider: ProviderId;
   }): void {
     const key = `${input.client}:${input.processId}:${input.upstreamSessionId}`;
@@ -621,7 +548,12 @@ export class AccountManager {
     try {
       phase = "draining";
       this.#store.saveSwitchRecord(record());
-      if (!(await this.waitUntilProviderIdle(provider))) {
+      // Managed Codex runs on the HTTP responses transport: an in-flight turn
+      // finishes on the bearer token it started with and the dispatch gate
+      // queues newly submitted turns during activation, so there is nothing
+      // to drain and a switch takes seconds. Claude Code caches credentials
+      // in process memory, so it must reach a request boundary first.
+      if (provider === "anthropic" && !(await this.waitUntilProviderIdle(provider))) {
         throw new ApplicationError(
           "SESSIONS_BUSY",
           `${provider} sessions did not become idle within 60 seconds`,

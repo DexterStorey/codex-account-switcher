@@ -7,6 +7,7 @@
 - Prefer pure functions, function declarations, descriptive camel-case names, and deterministic ordering.
 - One abstraction owns each concept; provider-specific details stop at provider adapters.
 - Never treat stale or missing usage as zero.
-- Never switch during a response or tool execution.
+- Never invalidate an in-flight response or tool execution; a switch may only affect
+  subsequent dispatches.
 - Never write a token to logs, SQLite, a command-line argument, or source control.
 - Add a regression test for every corrected auth, rate-limit, persistence, or continuity defect.

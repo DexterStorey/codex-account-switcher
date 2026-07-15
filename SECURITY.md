@@ -12,7 +12,6 @@
   `0700`. The native app-server binds only IPv4 loopback and requires a random capability token stored
   in a mode-`0600` file.
 - Tokens are never logged or passed as command-line arguments.
-- Managed Pi receives only the active access token over the local socket and holds it in process memory.
 
 Claude Code's official refresh-token handoff uses environment variables. The manager supplies them only
 to the direct child process and never persists them in its journal or logs.

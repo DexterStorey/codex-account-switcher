@@ -87,37 +87,6 @@ async function dispatch(
       const parsed = PolicyParamsSchema.parse(params);
       return manager.setAutomationPolicy(parsed);
     }
-    case "pi/credential/read": {
-      PiSessionParamsSchema.parse(params);
-      return manager.currentPiCredential();
-    }
-    case "pi/turn/begin": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      return manager.beginPiTurn({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-      });
-    }
-    case "pi/session/ack": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      manager.updatePiSession({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-        generation: parsed.generation ?? 0,
-        state: "idle",
-      });
-      return { acknowledged: true };
-    }
-    case "pi/session/state": {
-      const parsed = PiSessionParamsSchema.parse(params);
-      manager.updatePiSession({
-        upstreamSessionId: parsed.sessionId,
-        processId: parsed.processId,
-        generation: parsed.generation ?? 0,
-        state: parsed.state ?? "idle",
-      });
-      return { acknowledged: true };
-    }
     case "claude/session/start": {
       const parsed = PiSessionParamsSchema.parse(params);
       manager.updateClaudeSession({

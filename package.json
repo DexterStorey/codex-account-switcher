@@ -1,7 +1,7 @@
 {
   "name": "tokmax",
-  "version": "0.3.0",
-  "description": "A local account, quota, and runtime control plane for Codex, Claude Code, and Pi.",
+  "version": "0.4.0",
+  "description": "A local account, quota, and runtime control plane for Codex and Claude Code.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -9,7 +9,7 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist && bun build ./src/extensions/pi.ts --target bun --format esm --outdir dist/extensions && chmod 755 dist/index.js && chmod 644 dist/extensions/pi.js",
+    "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist && chmod 755 dist/index.js",
     "check": "bun run typecheck && bun run lint && bun test",
     "clean": "rm -rf dist",
     "dev": "bun run src/index.ts",
@@ -38,8 +38,7 @@
     "switch",
     "tokens",
     "rate-limits",
-    "claude-code",
-    "pi"
+    "claude-code"
   ],
   "preferGlobal": true,
   "repository": {
@@ -52,7 +51,6 @@
   "homepage": "https://github.com/DexterStorey/codex-account-switcher#readme",
   "author": "Dexter Storey",
   "dependencies": {
-    "@earendil-works/pi-ai": "0.80.6",
     "zod": "^4.0.0"
   },
   "devDependencies": {
