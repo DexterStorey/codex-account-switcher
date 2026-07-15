@@ -1,4 +1,3 @@
-import { z } from "zod";
 import type { ProviderId } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
 import type { FetchImplementation } from "./http.ts";
@@ -7,7 +6,8 @@ import type { FetchImplementation } from "./http.ts";
 // point their API traffic at it, and it swaps the active account's credential
 // into every request. Because the active account is read per request, a switch
 // takes effect on the very next request — including one mid-turn — with no
-// changes to the client processes.
+// changes to the client processes. It is a pure pass-through otherwise: it
+// never buffers or times out a response, so long streaming turns are safe.
 
 export interface UpstreamInjection {
   baseUrl: string;
@@ -20,8 +20,8 @@ export interface UpstreamInjection {
 }
 
 export interface ProxyCredentialSource {
-  // Returns how to reach the upstream and what auth to inject for the active
-  // account of a provider, or null when no account is active.
+  // How to reach the upstream and what auth to inject for a provider's active
+  // account, or null when no account is active.
   resolve(provider: ProviderId): Promise<UpstreamInjection | null>;
   // Forces a credential refresh for the active account, used once on a 401.
   refresh(provider: ProviderId): Promise<void>;
@@ -30,10 +30,10 @@ export interface ProxyCredentialSource {
 export interface ProxyOptions {
   source: ProxyCredentialSource;
   fetchImplementation?: FetchImplementation;
-  now?: () => number;
 }
 
-const hopByHopHeaders = [
+// Connection-level headers must not be forwarded; the runtime sets its own.
+const strippedRequestHeaders = [
   "host",
   "connection",
   "keep-alive",
@@ -45,40 +45,28 @@ const hopByHopHeaders = [
   "upgrade",
   "content-length",
 ];
-
-const providerByPrefix: Record<string, ProviderId> = {
-  openai: "openai",
-  anthropic: "anthropic",
-};
-
-export const ProxyStateSchema = z
-  .object({ port: z.number().int().positive(), pid: z.number().int().positive() })
-  .strict();
+// Re-set by the response stream, so they must not carry over from upstream.
+const strippedResponseHeaders = ["content-encoding", "content-length", "transfer-encoding"];
 
 function routeProvider(pathname: string): { provider: ProviderId; rest: string } | null {
   const match = pathname.match(/^\/(openai|anthropic)(\/.*)?$/);
   if (match === null) {
     return null;
   }
-  const provider = providerByPrefix[match[1] ?? ""];
-  return provider === undefined ? null : { provider, rest: match[2] ?? "/" };
+  return { provider: match[1] as ProviderId, rest: match[2] ?? "/" };
 }
 
 function forwardHeaders(incoming: Headers, injection: UpstreamInjection): Headers {
   const headers = new Headers(incoming);
-  for (const header of hopByHopHeaders) {
-    headers.delete(header);
-  }
-  for (const header of injection.stripHeaders ?? []) {
+  for (const header of [...strippedRequestHeaders, ...(injection.stripHeaders ?? [])]) {
     headers.delete(header);
   }
   for (const [name, value] of Object.entries(injection.headers)) {
     headers.set(name, value);
   }
   for (const [name, value] of Object.entries(injection.appendHeaders ?? {})) {
-    const existing = headers.get(name);
     const parts = new Set(
-      (existing === null ? "" : existing)
+      (headers.get(name) ?? "")
         .split(",")
         .map((part) => part.trim())
         .filter((part) => part.length > 0),
@@ -89,13 +77,16 @@ function forwardHeaders(incoming: Headers, injection: UpstreamInjection): Header
   return headers;
 }
 
-// A request body must survive one retry, so it is buffered when a retry is
-// possible. Streaming request bodies (rare for these clients) are read once.
-async function bufferBody(request: Request): Promise<ArrayBuffer | null> {
-  if (request.method === "GET" || request.method === "HEAD") {
-    return null;
+function passThrough(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const header of strippedResponseHeaders) {
+    headers.delete(header);
   }
-  return request.arrayBuffer();
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 export interface ProxyHandler {
@@ -111,16 +102,21 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
       if (route === null) {
         return new Response("tokmax proxy: unknown route\n", { status: 404 });
       }
-      const body = await bufferBody(request);
-      const send = async (injection: UpstreamInjection): Promise<Response> => {
-        const target = `${injection.baseUrl.replace(/\/$/, "")}${route.rest}${url.search}`;
-        return doFetch(target, {
+      // Buffered so the request can be replayed once after a 401 refresh; these
+      // clients send a single complete JSON body, never a stream.
+      const body =
+        request.method === "GET" || request.method === "HEAD"
+          ? undefined
+          : await request.arrayBuffer();
+      const send = (injection: UpstreamInjection): Promise<Response> =>
+        doFetch(`${injection.baseUrl.replace(/\/$/, "")}${route.rest}${url.search}`, {
           method: request.method,
           headers: forwardHeaders(request.headers, injection),
-          body: body === null ? undefined : body,
+          body,
           redirect: "manual",
+          // Propagate client disconnects to the upstream instead of leaking it.
+          signal: request.signal,
         });
-      };
 
       let injection: UpstreamInjection | null;
       try {
@@ -140,11 +136,12 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
           status: 502,
         });
       }
-      // A 401 means the injected token went stale between refresh cycles;
-      // refresh once and replay the identical request so the client never sees
-      // the transient failure.
+      // A 401 means the injected token went stale between refresh cycles: the
+      // status arrives before any body, so refreshing and replaying once keeps
+      // the client from ever seeing the transient failure.
       if (response.status === 401) {
         try {
+          await response.body?.cancel();
           await options.source.refresh(route.provider);
           const refreshed = await options.source.resolve(route.provider);
           if (refreshed !== null) {
@@ -154,16 +151,7 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
           // Fall through with the original 401; the client can surface it.
         }
       }
-
-      const responseHeaders = new Headers(response.headers);
-      for (const header of ["content-encoding", "content-length", "transfer-encoding"]) {
-        responseHeaders.delete(header);
-      }
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-      });
+      return passThrough(response);
     },
   };
 }
@@ -178,7 +166,10 @@ export function startProxy(options: ProxyOptions & { port?: number }): RunningPr
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: options.port ?? 0,
-    idleTimeout: 240,
+    // Disabled: a streaming turn can idle between chunks (extended thinking,
+    // tool round-trips) far longer than any fixed timeout, and cutting it is
+    // exactly the "connection closed mid-response" failure.
+    idleTimeout: 0,
     fetch: (request) => handler.handle(request),
   });
   const port = server.port;

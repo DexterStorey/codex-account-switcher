@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createProxyHandler, type ProxyCredentialSource, type UpstreamInjection } from "./proxy.ts";
+import {
+  createProxyHandler,
+  type ProxyCredentialSource,
+  startProxy,
+  type UpstreamInjection,
+} from "./proxy.ts";
 
 function source(overrides: Partial<ProxyCredentialSource> = {}): ProxyCredentialSource {
   return {
@@ -130,5 +135,51 @@ describe("proxy handler", () => {
     expect(forwarded?.get("connection")).toBeNull();
     expect(forwarded?.get("x-keep")).toBe("yes");
     expect(forwarded?.get("authorization")).toBe("Bearer token-1");
+  });
+});
+
+describe("proxy streaming", () => {
+  test("relays a slow streaming response whole without an idle-timeout cut", async () => {
+    // Chunks spaced 700ms apart stand in for a long turn's think/tool gaps.
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream({
+            async start(controller) {
+              for (let index = 1; index <= 3; index += 1) {
+                controller.enqueue(new TextEncoder().encode(`data: chunk ${index}\n\n`));
+                await Bun.sleep(700);
+              }
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const proxy = startProxy({
+      port: 0,
+      source: {
+        resolve: async () => ({
+          baseUrl: `http://127.0.0.1:${upstream.port}`,
+          headers: { authorization: "Bearer x" },
+        }),
+        refresh: async () => undefined,
+      },
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${proxy.port}/anthropic/v1/messages`, {
+        method: "POST",
+        body: "{}",
+      });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      for (const chunk of ["chunk 1", "chunk 2", "chunk 3"]) {
+        expect(text).toContain(chunk);
+      }
+    } finally {
+      await proxy.stop();
+      upstream.stop(true);
+    }
   });
 });
