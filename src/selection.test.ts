@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Account, ProviderState, UsageSnapshot } from "./domain.ts";
-import { pickDefaultAccount, selectRotation } from "./selection.ts";
+import { selectRotation } from "./selection.ts";
 
 const activeId = "00000000-0000-4000-8000-000000000001";
 const lowerId = "00000000-0000-4000-8000-000000000002";
@@ -139,27 +139,5 @@ describe("selectRotation", () => {
         now,
       }),
     ).toEqual({ rotate: false, reason: "minimumDwell" });
-  });
-});
-
-describe("pickDefaultAccount", () => {
-  test("prefers healthy accounts with the lowest measured pressure, then stable order", () => {
-    expect(
-      pickDefaultAccount({
-        accounts: [account(activeId), account(lowerId), account(lowestId)],
-        usage: [usage(activeId, 60), usage(lowerId, 10)],
-      })?.id,
-      // lowestId has no reading, so measured accounts win even at higher usage.
-    ).toBe(lowerId);
-    expect(
-      pickDefaultAccount({
-        accounts: [account(activeId, "reauthenticationRequired"), account(lowerId)],
-        usage: [usage(activeId, 5)],
-      })?.id,
-    ).toBe(lowerId);
-    expect(
-      pickDefaultAccount({ accounts: [account(lowerId), account(activeId)], usage: [] })?.id,
-    ).toBe(activeId);
-    expect(pickDefaultAccount({ accounts: [], usage: [] })).toBeNull();
   });
 });

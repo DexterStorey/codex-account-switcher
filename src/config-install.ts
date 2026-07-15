@@ -152,7 +152,3 @@ export async function isInstalled(): Promise<boolean> {
     content.includes("model_providers.tokmax"),
   );
 }
-
-export function configTargets(): { codex: string; claude: string } {
-  return { codex: codexConfigPath(), claude: claudeSettingsPath() };
-}

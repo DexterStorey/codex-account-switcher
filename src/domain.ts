@@ -54,13 +54,6 @@ export const AccountSchema = z
   });
 export type Account = z.infer<typeof AccountSchema>;
 
-export const UsageSourceSchema = z.enum([
-  "codexAppServer",
-  "codexUsageEndpoint",
-  "claudeUsageEndpoint",
-]);
-export type UsageSource = z.infer<typeof UsageSourceSchema>;
-
 export const UsageWindowSchema = z
   .object({
     id: z.string().trim().min(1),
@@ -82,7 +75,7 @@ const UsageSnapshotFieldsSchema = z.object({
 export const UsageSnapshotSchema = z.discriminatedUnion("provider", [
   UsageSnapshotFieldsSchema.extend({
     provider: z.literal("openai"),
-    source: z.enum(["codexAppServer", "codexUsageEndpoint"]),
+    source: z.literal("codexUsageEndpoint"),
   }).strict(),
   UsageSnapshotFieldsSchema.extend({
     provider: z.literal("anthropic"),

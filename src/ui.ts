@@ -9,7 +9,6 @@ import type {
 
 export interface RenderOptions {
   color?: boolean;
-  note?: string;
 }
 
 const ansi = {
@@ -257,9 +256,7 @@ export function renderDashboard(
 ): string {
   const paint = createPainter(options.color === true);
   const clock = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const header = `${paint("tokmax", "bold", "cyan")} ${paint(`· ${clock}`, "dim")}${
-    options.note === undefined ? "" : ` ${paint(options.note, "yellow")}`
-  }`;
+  const header = `${paint("tokmax", "bold", "cyan")} ${paint(`· ${clock}`, "dim")}`;
   return [
     header,
     "",

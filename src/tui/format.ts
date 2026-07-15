@@ -91,54 +91,6 @@ export function percentLabel(usedPercent: number | null): string {
   return usedPercent === null ? "  ?%" : `${Math.round(clamp(usedPercent))}%`.padStart(4);
 }
 
-const sparkTicks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
-
-// A fixed-scale (0..100) one-row trend; a flat-but-high window reads as high,
-// not as noise around its own mean.
-export function sparkline(points: readonly UsageHistoryPoint[], width: number): string {
-  if (points.length === 0) {
-    return "·".repeat(width);
-  }
-  const recent = points.slice(-width);
-  const body = recent
-    .map((point) => {
-      const index = Math.min(
-        sparkTicks.length - 1,
-        Math.floor((clamp(point.usedPercent) / 100) * sparkTicks.length),
-      );
-      return sparkTicks[index] ?? sparkTicks[0];
-    })
-    .join("");
-  return `${" ".repeat(Math.max(0, width - recent.length))}${body}`;
-}
-
-const eighths = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
-
-// A fixed-scale (0..100) area chart of usage over time, returned top row first.
-// Each of the last `width` points is a vertical bar; partial cells use
-// eighth-blocks so the trend reads smoothly.
-export function areaChart(
-  points: readonly UsageHistoryPoint[],
-  width: number,
-  height: number,
-): string[] {
-  const recent = points.slice(-width);
-  const columns = recent.map((point) => (clamp(point.usedPercent) / 100) * height);
-  const rows: string[] = [];
-  for (let row = height - 1; row >= 0; row -= 1) {
-    let line = "";
-    for (let column = 0; column < width; column += 1) {
-      const value = columns[column];
-      line +=
-        value === undefined
-          ? " "
-          : eighths[Math.max(0, Math.min(8, Math.round((value - row) * 8)))];
-    }
-    rows.push(line);
-  }
-  return rows;
-}
-
 export interface Timeframe {
   key: string;
   label: string;
@@ -336,22 +288,6 @@ export function relativeAge(observedAtMillis: number, nowMillis: number): string
   }
   const hours = Math.floor(minutes / 60);
   return hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
-}
-
-export function historyStats(points: readonly UsageHistoryPoint[]): {
-  now: number | null;
-  peak: number | null;
-  average: number | null;
-} {
-  if (points.length === 0) {
-    return { now: null, peak: null, average: null };
-  }
-  const values = points.map((point) => clamp(point.usedPercent));
-  return {
-    now: values[values.length - 1] ?? null,
-    peak: Math.max(...values),
-    average: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
-  };
 }
 
 export interface HealthBadge {

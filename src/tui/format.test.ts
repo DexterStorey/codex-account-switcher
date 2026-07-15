@@ -1,13 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { Account, UsageHistoryPoint } from "../domain.ts";
+import type { Account } from "../domain.ts";
 import {
-  areaChart,
   brailleLine,
   bucketSeries,
   darkTheme,
   detectThemeName,
   healthBadge,
-  historyStats,
   mergedPressureSeries,
   meter,
   percentLabel,
@@ -15,11 +13,7 @@ import {
   relativeAge,
   resetCountdown,
   shortWindow,
-  sparkline,
 } from "./format.ts";
-
-const points = (pcts: number[]): UsageHistoryPoint[] =>
-  pcts.map((usedPercent, at) => ({ at, usedPercent }));
 
 const base: Account = {
   id: "00000000-0000-4000-8000-000000000001",
@@ -69,29 +63,6 @@ describe("tui format", () => {
     expect(detectThemeName({ COLORFGBG: "0;15" })).toBe("light");
     expect(detectThemeName({ COLORFGBG: "15;0" })).toBe("dark");
     expect(detectThemeName({})).toBe("dark");
-  });
-
-  test("sparkline is fixed-scale and right-aligns a short series", () => {
-    expect(sparkline(points([0]), 4)).toBe("   ▁");
-    expect(sparkline(points([100]), 4)).toBe("   █");
-    expect(sparkline([], 4)).toBe("····");
-    expect(sparkline(points([95, 95, 95]), 4)).toBe(" ███");
-  });
-
-  test("area chart is fixed-scale, top row first, and right-sized", () => {
-    const chart = areaChart(points([0, 50, 100]), 3, 2);
-    expect(chart).toHaveLength(2);
-    for (const row of chart) {
-      expect(row).toHaveLength(3);
-    }
-    expect(chart[0]?.[2]).toBe("█");
-    expect(chart[0]?.[0]).toBe(" ");
-    expect(areaChart([], 4, 3).every((row) => row === "    ")).toBe(true);
-  });
-
-  test("history stats report now, peak, and average", () => {
-    expect(historyStats(points([10, 90, 50]))).toEqual({ now: 50, peak: 90, average: 50 });
-    expect(historyStats([])).toEqual({ now: null, peak: null, average: null });
   });
 
   test("relative age compresses to the largest unit", () => {
