@@ -381,3 +381,53 @@ describe("AccountManager switching", () => {
     testHarness.store.close();
   });
 });
+
+describe("probe backoff", () => {
+  test("a rate-limited account is not re-probed until its cooldown passes", async () => {
+    const { ApplicationError } = await import("./errors.ts");
+    const directory = await mkdtemp(join(tmpdir(), "manager-backoff-test-"));
+    temporaryDirectories.push(directory);
+    const paths = applicationPaths({ TOKMAX_HOME: directory });
+    const store = createStateStore(paths.database);
+    const limited = account("00000000-0000-4000-8000-000000000011", "limited");
+    store.saveAccount(limited);
+    let currentTime = now.getTime();
+    let probes = 0;
+    const adapter: ProviderAdapter = {
+      provider: "openai",
+      start: async () => undefined,
+      stop: async () => undefined,
+      probe: async () => {
+        probes += 1;
+        throw new ApplicationError("USAGE_RATE_LIMITED", "429");
+      },
+      pauseDispatch: async () => undefined,
+      resumeDispatch: () => undefined,
+      waitUntilIdle: async () => true,
+      synchronizeSource: async () => undefined,
+      activate: async () => undefined,
+    };
+    const manager = new AccountManager({
+      paths,
+      store,
+      vault: {
+        read: async () => null,
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+      dependencies: { now: () => new Date(currentTime) },
+      adapters: { openai: adapter, anthropic: inertAdapter("anthropic") },
+    });
+    await manager.refreshAll();
+    expect(probes).toBe(1);
+    expect(store.findAccount(limited.id)?.health).toBe("usageRateLimited");
+    // One minute later (the normal cadence) the account is still cooling down.
+    currentTime += 60_000;
+    await manager.refreshAll();
+    expect(probes).toBe(1);
+    // After the five-minute cooldown, probing resumes.
+    currentTime += 5 * 60_000;
+    await manager.refreshAll();
+    expect(probes).toBe(2);
+  });
+});

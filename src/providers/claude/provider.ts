@@ -74,6 +74,13 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
   public readonly provider = "anthropic" as const;
   readonly #paths: ApplicationPaths;
   readonly #dependencies: AnthropicProviderDependencies;
+  // An access token maps to exactly one upstream account, so identity only
+  // needs re-verification when the token changes. Probing the profile
+  // endpoint every cycle doubled request volume and drew 429s.
+  readonly #verifiedIdentities = new Map<
+    string,
+    { accessToken: string; accountId: string; email: string | null }
+  >();
   #projectedAccountId: string | null = null;
 
   public constructor(input: {
@@ -126,15 +133,27 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
         "Claude credential does not include the user:profile scope required for usage",
       );
     }
-    let profile = await fetchClaudeProfile(
-      credential.accessToken,
-      this.#dependencies.fetchImplementation,
-    ).catch(async (error) => {
+    const verifyIdentity = async (): Promise<{ accountId: string; email: string | null }> => {
+      const cached = this.#verifiedIdentities.get(profilePath);
+      if (cached !== undefined && cached.accessToken === credential.accessToken) {
+        return { accountId: cached.accountId, email: cached.email };
+      }
+      const fetched = await fetchClaudeProfile(
+        credential.accessToken,
+        this.#dependencies.fetchImplementation,
+      );
+      this.#verifiedIdentities.set(profilePath, {
+        accessToken: credential.accessToken,
+        ...fetched,
+      });
+      return fetched;
+    };
+    let profile = await verifyIdentity().catch(async (error) => {
       if (!(error instanceof ApplicationError) || error.code !== "REAUTHENTICATION_REQUIRED") {
         throw error;
       }
       credential = await refreshClaudeProfile({ profilePath, credentialReader: reader });
-      return fetchClaudeProfile(credential.accessToken, this.#dependencies.fetchImplementation);
+      return verifyIdentity();
     });
     assertIdentity(anthropicAccount, profile.accountId);
     const usage = await fetchClaudeUsage({
@@ -146,10 +165,7 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
         throw error;
       }
       credential = await refreshClaudeProfile({ profilePath, credentialReader: reader });
-      profile = await fetchClaudeProfile(
-        credential.accessToken,
-        this.#dependencies.fetchImplementation,
-      );
+      profile = await verifyIdentity();
       return fetchClaudeUsage({
         accountId: anthropicAccount.id,
         accessToken: credential.accessToken,

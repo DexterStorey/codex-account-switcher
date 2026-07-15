@@ -138,7 +138,10 @@ function healthNote(account: Account): { note: string; severity: AnsiCode } | nu
     case "temporarilyUnreachable":
       return { note: "provider unreachable — retrying every 60s", severity: "yellow" };
     case "usageRateLimited":
-      return { note: "usage probe rate-limited — excluded from auto-rotate", severity: "yellow" };
+      return {
+        note: "usage probe rate-limited — backing off a few minutes; auto-rotate skips it",
+        severity: "yellow",
+      };
     case "disabled":
       return { note: "disabled", severity: "dim" };
   }

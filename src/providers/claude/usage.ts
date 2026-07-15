@@ -134,7 +134,7 @@ export async function fetchClaudeUsage(input: {
         "Content-Type": "application/json",
         "anthropic-beta": "oauth-2025-04-20",
       },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(10_000),
     },
   );
   if (response.status === 401) {

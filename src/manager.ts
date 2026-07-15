@@ -84,6 +84,9 @@ export class AccountManager {
   readonly #providerBarriers = new Map<ProviderId, Promise<void>>();
   readonly #providerBarrierReleases = new Map<ProviderId, () => void>();
   readonly #runtimeIdentifiers = new Map<string, string>();
+  // Accounts whose usage endpoint answered 429 are left alone until the
+  // cooldown passes; re-probing every cycle just extends the rate limit.
+  readonly #probeCooldownUntil = new Map<string, number>();
   #monitor: ReturnType<typeof setInterval> | null = null;
   #refreshOperation: Promise<void> | null = null;
   #stopping = false;
@@ -468,10 +471,17 @@ export class AccountManager {
       if (!account.enabled) {
         continue;
       }
+      const cooldownUntil = this.#probeCooldownUntil.get(account.id) ?? 0;
+      if (this.#dependencies.now().getTime() < cooldownUntil) {
+        continue;
+      }
       await this.refreshAccount(account).catch((error) => {
         process.stderr.write(
           `probe failed for ${account.provider} ${account.label}: ${errorMessage(error)}\n`,
         );
+        if (error instanceof ApplicationError && error.code === "USAGE_RATE_LIMITED") {
+          this.#probeCooldownUntil.set(account.id, this.#dependencies.now().getTime() + 5 * 60_000);
+        }
         this.#store.saveAccount({
           ...account,
           health: healthForError(error),
