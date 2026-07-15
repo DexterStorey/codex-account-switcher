@@ -389,3 +389,61 @@ describe("probe backoff", () => {
     expect(probes).toBe(2);
   });
 });
+
+describe("probe cadence", () => {
+  test("idle accounts are probed at a coarser interval than the active account", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "manager-cadence-test-"));
+    temporaryDirectories.push(directory);
+    const paths = applicationPaths({ TOKMAX_HOME: directory });
+    const store = createStateStore(paths.database);
+    const active = account("00000000-0000-4000-8000-000000000021", "active");
+    const idle = account("00000000-0000-4000-8000-000000000022", "idle");
+    store.saveAccount(active);
+    store.saveAccount(idle);
+    store.saveProviderState({
+      ...store.findProviderState("openai"),
+      activeAccountId: active.id,
+      generation: 1,
+      switchedAt: now.toISOString(),
+    });
+    let currentTime = now.getTime();
+    const probes: string[] = [];
+    const adapter: ProviderAdapter = {
+      provider: "openai",
+      start: async () => undefined,
+      stop: async () => undefined,
+      probe: async (candidate) => {
+        probes.push(candidate.label);
+        return { account: candidate, usage: usage(candidate) };
+      },
+      pauseDispatch: async () => undefined,
+      resumeDispatch: () => undefined,
+      waitUntilIdle: async () => true,
+      synchronizeSource: async () => undefined,
+      activate: async () => undefined,
+    };
+    const manager = new AccountManager({
+      paths,
+      store,
+      vault: {
+        read: async () => null,
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+      dependencies: { now: () => new Date(currentTime) },
+      adapters: { openai: adapter, anthropic: inertAdapter("anthropic") },
+    });
+    await manager.refreshAll();
+    expect(probes).toEqual(["active@example.com", "idle@example.com"]);
+    // One minute later only the active account is probed again.
+    currentTime += 60_000;
+    await manager.refreshAll();
+    expect(probes.filter((label) => label === "active@example.com")).toHaveLength(2);
+    expect(probes.filter((label) => label === "idle@example.com")).toHaveLength(1);
+    // After five minutes the idle account gets its coarse reading.
+    currentTime += 5 * 60_000;
+    await manager.refreshAll();
+    expect(probes.filter((label) => label === "idle@example.com")).toHaveLength(2);
+    store.close();
+  });
+});

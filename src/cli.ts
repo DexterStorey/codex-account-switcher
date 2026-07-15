@@ -389,27 +389,36 @@ async function reauthenticateAccount(
     throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> relogin <email-or-id>");
   }
   const provider = providerFromCli(providerArgument);
+  // Relogin owns the daemon lifecycle instead of telling the user to.
+  const managerWasRunning = await managerAvailable(context.paths.managerSocket);
+  if (managerWasRunning) {
+    process.stdout.write("Pausing the manager for relogin…\n");
+    await stopDaemon(context);
+  }
   const lock = await acquireDaemonLock(context.paths.managerLock);
   try {
-    if (await managerAvailable(context.paths.managerSocket)) {
-      throw new ApplicationError(
-        "DAEMON_RUNNING",
-        "Stop the manager before relogin: tokmax daemon stop",
-      );
-    }
-    const liveSession = context.store.listRuntimeSessions().find((session) => {
-      try {
-        process.kill(session.processId, 0);
-        return true;
-      } catch {
-        return false;
+    // Live sessions only matter when they ride the credential being replaced;
+    // refreshing a non-active account never touches the active profile.
+    const activeAccountId = context.store.findProviderState(provider).activeAccountId;
+    const target = resolveAccount(context.store, provider, accountReference);
+    if (target.id === activeAccountId) {
+      const liveSession = context.store.listRuntimeSessions().find((session) => {
+        if (session.provider !== provider) {
+          return false;
+        }
+        try {
+          process.kill(session.processId, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (liveSession !== undefined) {
+        throw new ApplicationError(
+          "SESSIONS_RUNNING",
+          `${target.label} is the active ${providerArgument} account and managed ${liveSession.client} process ${liveSession.processId} is still using it; close it or switch first`,
+        );
       }
-    });
-    if (liveSession !== undefined) {
-      throw new ApplicationError(
-        "SESSIONS_RUNNING",
-        `Managed ${liveSession.client} process ${liveSession.processId} is still running`,
-      );
     }
     const existing = resolveAccount(context.store, provider, accountReference);
     if (existing.externalAccountId === null) {
@@ -452,11 +461,18 @@ async function reauthenticateAccount(
         `warning: reauthentication succeeded but the prior credential could not be removed: ${errorMessage(error)}\n`,
       );
     }
-    process.stdout.write(
-      `Reauthenticated ${providerArgument} account ${replacement.label}; it will be projected when the manager starts.\n`,
-    );
+    process.stdout.write(`Reauthenticated ${providerArgument} account ${replacement.label}.\n`);
   } finally {
     await lock.release();
+    if (managerWasRunning) {
+      await startDaemon(context).then(
+        () => process.stdout.write("Manager resumed.\n"),
+        (error) =>
+          process.stderr.write(
+            `warning: manager did not restart (${errorMessage(error)}); run tokmax daemon start\n`,
+          ),
+      );
+    }
   }
 }
 

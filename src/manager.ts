@@ -87,6 +87,7 @@ export class AccountManager {
   // Accounts whose usage endpoint answered 429 are left alone until the
   // cooldown passes; re-probing every cycle just extends the rate limit.
   readonly #probeCooldownUntil = new Map<string, number>();
+  readonly #lastProbeStartedAt = new Map<string, number>();
   #monitor: ReturnType<typeof setInterval> | null = null;
   #refreshOperation: Promise<void> | null = null;
   #stopping = false;
@@ -402,6 +403,17 @@ export class AccountManager {
       if (this.#dependencies.now().getTime() < cooldownUntil) {
         continue;
       }
+      // Only the active account needs minute-level freshness (it drives
+      // rotation); idle accounts get coarse readings so four registered
+      // accounts do not quadruple the provider's probe traffic.
+      const isActive =
+        this.#store.findProviderState(account.provider).activeAccountId === account.id;
+      const probeInterval = isActive ? 0 : 5 * 60_000;
+      const lastStartedAt = this.#lastProbeStartedAt.get(account.id) ?? 0;
+      if (this.#dependencies.now().getTime() - lastStartedAt < probeInterval) {
+        continue;
+      }
+      this.#lastProbeStartedAt.set(account.id, this.#dependencies.now().getTime());
       await this.refreshAccount(account).catch((error) => {
         process.stderr.write(
           `probe failed for ${account.provider} ${account.label}: ${errorMessage(error)}\n`,
