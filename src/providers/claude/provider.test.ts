@@ -22,6 +22,6 @@ describe("AnthropicProviderAdapter", () => {
     const adapter = new AnthropicProviderAdapter({
       dependencies: { fetchImplementation: fetch, now: () => new Date("2026-07-10T12:00:00.000Z") },
     });
-    await expect(adapter.probe(openAiAccount)).rejects.toThrow("non-Anthropic account");
+    await expect(adapter.probe(openAiAccount)).rejects.toThrow("adapter received a openai account");
   });
 });

@@ -1,7 +1,7 @@
 import { type Account, AccountEmailSchema } from "../../domain.ts";
 import { ApplicationError } from "../../errors.ts";
 import type { FetchImplementation } from "../../http.ts";
-import type { ProviderAdapter, ProviderProbeResult } from "../provider.ts";
+import { type ProviderAdapter, type ProviderProbeResult, requireProvider } from "../provider.ts";
 import {
   claudePlanTier,
   defaultClaudeCredentialReader,
@@ -62,7 +62,7 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
   }
 
   public async probe(account: Account): Promise<ProviderProbeResult> {
-    const anthropicAccount = this.requireAccount(account);
+    const anthropicAccount = requireProvider(account, "anthropic");
     const profilePath = anthropicAccount.profilePath;
     if (profilePath === null) {
       throw new ApplicationError("CREDENTIAL_MISSING", `${account.label} has no stored profile`);
@@ -130,15 +130,5 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
       },
       usage,
     };
-  }
-
-  private requireAccount(account: Account): Extract<Account, { provider: "anthropic" }> {
-    if (account.provider !== "anthropic") {
-      throw new ApplicationError(
-        "PROVIDER_MISMATCH",
-        "Anthropic adapter received a non-Anthropic account",
-      );
-    }
-    return account;
   }
 }

@@ -276,37 +276,34 @@ function legend(ctx: Ctx, snapshot: DashboardSnapshot): ReturnType<typeof Box> |
   );
 }
 
+// A single labelled pill: filled with the accent when active, muted otherwise.
+// Shared by the tab bar and the analytics scope/range toggles.
+function pill(ctx: Ctx, label: string, active: boolean) {
+  return Text({
+    content: ` ${label} `,
+    fg: rgb(active ? ctx.theme.bg : ctx.theme.dim),
+    bg: rgb(active ? ctx.theme.accent : ctx.theme.bg),
+    attributes: active ? 1 : 0,
+  });
+}
+
 function tabBar(ctx: Ctx, tab: Tab) {
-  const pill = (label: string, active: boolean) =>
-    Text({
-      content: ` ${label} `,
-      fg: rgb(active ? ctx.theme.bg : ctx.theme.dim),
-      bg: rgb(active ? ctx.theme.accent : ctx.theme.bg),
-      attributes: active ? 1 : 0,
-    });
   return Box(
     { flexDirection: "row", gap: 1 },
-    pill("Accounts", tab === "accounts"),
-    pill("Analytics", tab === "analytics"),
+    pill(ctx, "Accounts", tab === "accounts"),
+    pill(ctx, "Analytics", tab === "analytics"),
   );
 }
 
 // The scope + timeframe selectors, each a row of pills with the active one lit.
 function analyticsControls(ctx: Ctx, scope: Scope, timeframe: Timeframe) {
-  const toggle = (label: string, active: boolean) =>
-    Text({
-      content: ` ${label} `,
-      fg: rgb(active ? ctx.theme.bg : ctx.theme.dim),
-      bg: rgb(active ? ctx.theme.accent : ctx.theme.bg),
-      attributes: active ? 1 : 0,
-    });
   const scopeCells = scopeOrder.flatMap((option, index) => [
     ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
-    toggle(scopeLabel[option], option === scope),
+    pill(ctx, scopeLabel[option], option === scope),
   ]);
   const rangeCells = TIMEFRAMES.flatMap((option, index) => [
     ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
-    toggle(option.label, option.key === timeframe.key),
+    pill(ctx, option.label, option.key === timeframe.key),
   ]);
   return Box(
     { flexDirection: "row", width: "100%", paddingLeft: 1 },

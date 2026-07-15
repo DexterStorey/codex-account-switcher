@@ -1,7 +1,7 @@
 import { type Account, AccountEmailSchema } from "../../domain.ts";
 import { ApplicationError } from "../../errors.ts";
 import type { FetchImplementation } from "../../http.ts";
-import type { ProviderAdapter, ProviderProbeResult } from "../provider.ts";
+import { type ProviderAdapter, type ProviderProbeResult, requireProvider } from "../provider.ts";
 import {
   type CredentialVault,
   codexIdentity,
@@ -26,7 +26,7 @@ export class OpenAiProviderAdapter implements ProviderAdapter {
   }
 
   public async probe(account: Account): Promise<ProviderProbeResult> {
-    const openAiAccount = this.requireAccount(account);
+    const openAiAccount = requireProvider(account, "openai");
     if (openAiAccount.secretReference === null) {
       throw new ApplicationError("CREDENTIAL_MISSING", `${account.label} has no stored credential`);
     }
@@ -81,15 +81,5 @@ export class OpenAiProviderAdapter implements ProviderAdapter {
       },
       usage,
     };
-  }
-
-  private requireAccount(account: Account): Extract<Account, { provider: "openai" }> {
-    if (account.provider !== "openai") {
-      throw new ApplicationError(
-        "PROVIDER_MISMATCH",
-        "OpenAI adapter received a non-OpenAI account",
-      );
-    }
-    return account;
   }
 }
