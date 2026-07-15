@@ -4,6 +4,8 @@
 - Validate every external, IPC, persistence, and credential boundary.
 - Do not use `any`, unchecked provider casts, shared mutable auth files, or hidden fallback flows.
 - Keep provider accounts separate from runtime clients.
+- The clients run natively; tokmax injects the active credential in the proxy, never by
+  rewriting a running client's own auth files.
 - Prefer pure functions, function declarations, descriptive camel-case names, and deterministic ordering.
 - One abstraction owns each concept; provider-specific details stop at provider adapters.
 - Never treat stale or missing usage as zero.

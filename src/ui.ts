@@ -231,16 +231,12 @@ function providerSection(
         Number(state.activeAccountId !== left.id) - Number(state.activeAccountId !== right.id);
       return activeOrder !== 0 ? activeOrder : left.label.localeCompare(right.label);
     });
-  const sessionCount = snapshot.sessions.filter(
-    (session) => session.provider === provider && session.state !== "stopped",
-  ).length;
   const details = [
-    sessionCount === 0 ? null : `${sessionCount} session${sessionCount === 1 ? "" : "s"}`,
     state.policy.enabled ? `auto-rotate @${state.policy.thresholdPercent}%` : "auto-rotate off",
     `gen ${state.generation}`,
-  ].filter((detail): detail is string => detail !== null);
+  ];
   const lines = [
-    `${paint(pad(providerTitle(provider), 34), "bold")}${paint(details.join(" · "), sessionCount > 0 ? "cyan" : "dim")}`,
+    `${paint(pad(providerTitle(provider), 34), "bold")}${paint(details.join(" · "), "dim")}`,
   ];
   if (accounts.length === 0) {
     lines.push(`  ${paint(`no accounts yet — tokmax ${providerCliName(provider)} login`, "dim")}`);
@@ -276,7 +272,7 @@ export function renderDashboard(
     "",
     providerSection(paint, snapshot, "anthropic", now),
     "",
-    paint("● active — managed sessions use it · q quit · r refresh · tokmax --help", "dim"),
+    paint("● active — every request uses it · q quit · r refresh · tokmax --help", "dim"),
   ].join("\n");
 }
 
