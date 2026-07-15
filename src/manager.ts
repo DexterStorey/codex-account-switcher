@@ -2,6 +2,7 @@ import {
   type Account,
   AutomationPolicySchema,
   type ProviderId,
+  type ProviderState,
   SwitchRecordSchema,
 } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
@@ -173,27 +174,13 @@ export class AccountManager {
       }
       const state = this.#store.findProviderState(input.account.provider);
       if (state.activeAccountId === null) {
-        const now = this.#dependencies.now().toISOString();
-        this.#store.commitSwitch(
-          SwitchRecordSchema.parse({
-            id: crypto.randomUUID(),
-            provider: input.account.provider,
-            sourceAccountId: null,
-            targetAccountId: input.account.id,
-            phase: "committed",
-            reason: "first-account",
-            generation: state.generation + 1,
-            message: null,
-            createdAt: now,
-            updatedAt: now,
-          }),
-          {
-            ...state,
-            activeAccountId: input.account.id,
-            generation: state.generation + 1,
-            switchedAt: now,
-          },
-        );
+        this.commitActivation({
+          provider: input.account.provider,
+          state,
+          sourceAccountId: null,
+          target: input.account,
+          reason: "first-account",
+        });
       }
     });
   }
@@ -264,27 +251,13 @@ export class AccountManager {
       if (state.activeAccountId !== targetAccountId) {
         await this.probeAndSave(target);
       }
-      const now = this.#dependencies.now().toISOString();
-      this.#store.commitSwitch(
-        SwitchRecordSchema.parse({
-          id: crypto.randomUUID(),
-          provider,
-          sourceAccountId: state.activeAccountId,
-          targetAccountId,
-          phase: "committed",
-          reason,
-          generation: state.generation + 1,
-          message: null,
-          createdAt: now,
-          updatedAt: now,
-        }),
-        {
-          ...state,
-          activeAccountId: target.id,
-          generation: state.generation + 1,
-          switchedAt: now,
-        },
-      );
+      this.commitActivation({
+        provider,
+        state,
+        sourceAccountId: state.activeAccountId,
+        target,
+        reason,
+      });
     });
   }
 
@@ -359,24 +332,42 @@ export class AccountManager {
     if (target === null || target.provider !== provider || !target.enabled) {
       return;
     }
+    this.commitActivation({
+      provider,
+      state,
+      sourceAccountId: state.activeAccountId,
+      target,
+      reason: `automatic:${reason}`,
+    });
+  }
+
+  // Every activation — first account, manual switch, automatic rotation — writes
+  // the same committed switch record and advances the provider's generation.
+  private commitActivation(input: {
+    provider: ProviderId;
+    state: ProviderState;
+    sourceAccountId: string | null;
+    target: Account;
+    reason: string;
+  }): void {
     const now = this.#dependencies.now().toISOString();
     this.#store.commitSwitch(
       SwitchRecordSchema.parse({
         id: crypto.randomUUID(),
-        provider,
-        sourceAccountId: state.activeAccountId,
-        targetAccountId,
+        provider: input.provider,
+        sourceAccountId: input.sourceAccountId,
+        targetAccountId: input.target.id,
         phase: "committed",
-        reason: `automatic:${reason}`,
-        generation: state.generation + 1,
+        reason: input.reason,
+        generation: input.state.generation + 1,
         message: null,
         createdAt: now,
         updatedAt: now,
       }),
       {
-        ...state,
-        activeAccountId: target.id,
-        generation: state.generation + 1,
+        ...input.state,
+        activeAccountId: input.target.id,
+        generation: input.state.generation + 1,
         switchedAt: now,
       },
     );

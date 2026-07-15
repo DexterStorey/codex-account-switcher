@@ -231,17 +231,26 @@ export function createStateStore(databasePath: string): StateStore {
     }
   }
 
+  // One place turns a SELECT of JSON payloads into validated domain objects.
+  function queryAll<Type>(
+    schema: PersistedSchema<Type>,
+    sql: string,
+    ...params: (string | number)[]
+  ): Type[] {
+    return database
+      .query<JsonRow, (string | number)[]>(sql)
+      .all(...params)
+      .map((row) => parseRequiredPayload(row, schema));
+  }
+
   function listAccounts(provider?: ProviderId): Account[] {
-    const rows = provider
-      ? database
-          .query<JsonRow, [ProviderId]>(
-            "SELECT payload FROM accounts WHERE provider = ? ORDER BY label, id",
-          )
-          .all(provider)
-      : database
-          .query<JsonRow, []>("SELECT payload FROM accounts ORDER BY provider, label, id")
-          .all();
-    return rows.map((row) => parseRequiredPayload(row, AccountSchema));
+    return provider
+      ? queryAll(
+          AccountSchema,
+          "SELECT payload FROM accounts WHERE provider = ? ORDER BY label, id",
+          provider,
+        )
+      : queryAll(AccountSchema, "SELECT payload FROM accounts ORDER BY provider, label, id");
   }
 
   function findAccount(accountId: string): Account | null {
@@ -313,10 +322,7 @@ export function createStateStore(databasePath: string): StateStore {
   }
 
   function listUsage(): UsageSnapshot[] {
-    return database
-      .query<JsonRow, []>("SELECT payload FROM usage_snapshots ORDER BY account_id")
-      .all()
-      .map((row) => parseRequiredPayload(row, UsageSnapshotSchema));
+    return queryAll(UsageSnapshotSchema, "SELECT payload FROM usage_snapshots ORDER BY account_id");
   }
 
   function findUsage(accountId: string): UsageSnapshot | null {
@@ -393,10 +399,7 @@ export function createStateStore(databasePath: string): StateStore {
   }
 
   function listProviderStates(): ProviderState[] {
-    return database
-      .query<JsonRow, []>("SELECT payload FROM provider_states ORDER BY provider")
-      .all()
-      .map((row) => parseRequiredPayload(row, ProviderStateSchema));
+    return queryAll(ProviderStateSchema, "SELECT payload FROM provider_states ORDER BY provider");
   }
 
   function findProviderState(provider: ProviderId): ProviderState {
@@ -437,12 +440,11 @@ export function createStateStore(databasePath: string): StateStore {
   }
 
   function listSwitchRecords(limit = 50): SwitchRecord[] {
-    return database
-      .query<JsonRow, [number]>(
-        "SELECT payload FROM switch_records ORDER BY created_at DESC LIMIT ?",
-      )
-      .all(limit)
-      .map((row) => parseRequiredPayload(row, SwitchRecordSchema));
+    return queryAll(
+      SwitchRecordSchema,
+      "SELECT payload FROM switch_records ORDER BY created_at DESC LIMIT ?",
+      limit,
+    );
   }
 
   function saveSwitchRecord(record: SwitchRecord): void {
