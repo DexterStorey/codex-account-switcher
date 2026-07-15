@@ -63,28 +63,63 @@ function option(arguments_: readonly string[], name: string): string | undefined
 }
 
 function help(): string {
-  return `tokmax — juggle rate limits across your Codex and Claude Code accounts
-
-Setup
-  tokmax login <codex|claude>              sign in an account (re-run to re-auth)
-  tokmax install                           route native codex & claude through tokmax
-  tokmax uninstall                         restore your original config
-
-Everyday
-  tokmax                                   the live dashboard
-  tokmax switch <codex|claude> <email>     make an account active
-  tokmax auto <codex|claude|both> <on|off> [--threshold 95]
-  tokmax list                              accounts and their health
-
-Details
-  tokmax status                            machine-readable JSON snapshot
-  tokmax refresh                           re-probe usage now
-  tokmax doctor                            check tools, proxy, and config
-  tokmax daemon <start|stop|status>        the background manager
-
-Once installed, just use codex and claude normally: a local proxy swaps in the
-active account's credential per request, so a switch (manual or auto-rotate)
-takes effect on the very next request — even mid-turn — with no restart.`;
+  // Color only for an interactive terminal; a pipe or NO_COLOR gets clean text.
+  const color =
+    process.stdout.isTTY === true &&
+    process.env.NO_COLOR === undefined &&
+    process.env.TERM !== "dumb";
+  const sgr = (code: string, text: string) => (color ? `\x1b[${code}m${text}\x1b[0m` : text);
+  const accent = (text: string) => sgr("38;2;90;176;255", text);
+  const dim = (text: string) => sgr("38;2;139;147;161", text);
+  const head = (text: string) => sgr("1", text);
+  // Descriptions align at a fixed column; a command wider than the field drops
+  // its description to the next line so nothing spills past 80 columns.
+  const field = 32;
+  const gutter = " ".repeat(field + 2);
+  const row = (name: string, ...lines: string[]): string => {
+    if (name.length <= field - 1) {
+      const [first = "", ...rest] = lines;
+      const head1 = `  ${accent(name)}${" ".repeat(field - name.length)}${dim(first)}`;
+      return [head1, ...rest.map((line) => `${gutter}${dim(line)}`)].join("\n");
+    }
+    return [`  ${accent(name)}`, ...lines.map((line) => `${gutter}${dim(line)}`)].join("\n");
+  };
+  return [
+    `${accent("tokmax")} ${dim("— juggle rate limits across your Codex and Claude Code accounts")}`,
+    "",
+    `${head("Usage")}  tokmax <command> [options]        ${dim("run with no command for the dashboard")}`,
+    "",
+    head("Setup"),
+    row("login <codex|claude>", "sign in an account · re-run to re-auth"),
+    row("install", "route codex & claude through tokmax"),
+    row("uninstall", "restore your original config"),
+    "",
+    head("Everyday"),
+    row("list", "accounts, health, and live usage"),
+    row("switch <codex|claude> <email>", "make an account active now"),
+    row(
+      "auto <codex|claude|both> <on|off>",
+      "rotate before you hit a limit",
+      "optional: --threshold N  (default 95)",
+    ),
+    "",
+    head("Details"),
+    row("status", "machine-readable JSON snapshot"),
+    row("refresh", "re-probe usage now"),
+    row("doctor", "check tools, proxy, and config"),
+    row("daemon <start|stop|status>", "the background manager"),
+    "",
+    head("Auto-rotation"),
+    dim("  The threshold is measured against the active account's fullest rate-limit"),
+    dim("  window — its 5-hour or weekly window, whichever is highest. When that"),
+    dim("  reaches the threshold (default 95%) or the account gets limited, tokmax"),
+    dim("  switches to the healthy account with the most headroom and holds it for"),
+    dim("  at least 5 minutes. Turning auto on is what authorizes the switching."),
+    "",
+    dim("Once installed, use codex and claude normally — a local proxy injects the"),
+    dim("active account's credential per request, so a switch takes effect on the"),
+    dim("next request, even mid-turn, with no restart."),
+  ].join("\n");
 }
 
 async function createContext(): Promise<ApplicationContext> {
@@ -385,9 +420,16 @@ async function configureAutomation(
       : ([providerFromCli(providerArgument)] as const);
   const thresholdValue = option(arguments_, "--threshold");
   const thresholdPercent = thresholdValue === undefined ? undefined : Number(thresholdValue);
+  if (
+    thresholdPercent !== undefined &&
+    (!Number.isFinite(thresholdPercent) || thresholdPercent < 1 || thresholdPercent > 100)
+  ) {
+    throw new ApplicationError("USAGE", "--threshold takes a percentage from 1 to 100");
+  }
   await ensureDaemon(context);
+  let effectiveThreshold = thresholdPercent ?? 95;
   for (const provider of providers) {
-    await managerRequest({
+    const state = await managerRequest({
       socketPath: context.paths.managerSocket,
       method: "policy/set",
       params: {
@@ -398,12 +440,20 @@ async function configureAutomation(
         // dashboard's toggle; the ToS guidance lives in the docs.
         authorizationConfirmed: mode === "on",
       },
-      schema: z.unknown(),
+      // The manager echoes the stored provider state so we report the threshold
+      // actually in force, not just the one passed on this invocation.
+      schema: z.object({ policy: z.object({ thresholdPercent: z.number() }) }),
     });
+    effectiveThreshold = state.policy.thresholdPercent;
   }
-  process.stdout.write(
-    `Auto-rotate ${mode === "on" ? "on" : "off"} for ${providerArgument}${thresholdPercent === undefined ? "" : ` at ${thresholdPercent}%`}.\n`,
-  );
+  if (mode === "on") {
+    process.stdout.write(`Auto-rotate on for ${providerArgument} at ${effectiveThreshold}%.\n`);
+    process.stdout.write(
+      `Rotates when the active account's fullest rate-limit window reaches ${effectiveThreshold}%.\n`,
+    );
+  } else {
+    process.stdout.write(`Auto-rotate off for ${providerArgument}.\n`);
+  }
 }
 
 // Launch a native client. With config installed, plain `codex`/`claude` route
