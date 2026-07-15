@@ -1,0 +1,26 @@
+[
+  {
+    "name": "accounts",
+    "caption": "Every account and its live rate-limit windows, at a glance."
+  },
+  {
+    "name": "hot",
+    "caption": "The active Codex account is nearly out — auto-rotate is about to fire."
+  },
+  {
+    "name": "expanded",
+    "caption": "Press space: plan tier, per-window reset countdowns, account id."
+  },
+  {
+    "name": "analytics",
+    "caption": "Usage over time for both providers — real-time braille charting."
+  },
+  {
+    "name": "analytics-codex",
+    "caption": "One provider, full timeframe axis and live metrics."
+  },
+  {
+    "name": "onboarding",
+    "caption": "A fresh install: sign in, then route native codex & claude."
+  }
+]
