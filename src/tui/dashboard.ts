@@ -545,13 +545,17 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
 
 export async function runTuiDashboard(
   socketPath: string,
-  options: { installed: boolean },
+  options: { installed: boolean; fixture?: AnalyticsSnapshot; now?: number },
 ): Promise<void> {
+  // Fixture mode renders a synthetic snapshot with a pinned clock and theme so
+  // documentation screenshots are byte-for-byte reproducible and need no daemon.
+  const live = options.fixture === undefined;
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
   await renderer.waitForThemeMode(400).catch(() => null);
   const envFallback: ThemeName = detectThemeName(process.env);
-  const currentTheme = (): Theme => themes[renderer.themeMode ?? envFallback];
-  let analytics = await readAnalytics(socketPath);
+  const currentTheme = (): Theme =>
+    themes[live ? (renderer.themeMode ?? envFallback) : envFallback];
+  let analytics = options.fixture ?? (await readAnalytics(socketPath));
   let rows = orderedRows(analytics.snapshot);
   const state: ViewState = {
     tab: "accounts",
@@ -576,7 +580,12 @@ export async function runTuiDashboard(
     clampSelection();
     let next: ReturnType<typeof Box>;
     try {
-      next = view({ theme: currentTheme(), now: Date.now() }, analytics, rows, state);
+      next = view(
+        { theme: currentTheme(), now: options.now ?? Date.now() },
+        analytics,
+        rows,
+        state,
+      );
     } catch {
       return;
     }
@@ -662,14 +671,18 @@ export async function runTuiDashboard(
   };
 
   await new Promise<void>((resolve) => {
-    const interval = setInterval(() => void reload(false).catch(() => undefined), 2_000);
+    const interval = live
+      ? setInterval(() => void reload(false).catch(() => undefined), 2_000)
+      : null;
     let finished = false;
     const finish = () => {
       if (finished) {
         return;
       }
       finished = true;
-      clearInterval(interval);
+      if (interval !== null) {
+        clearInterval(interval);
+      }
       try {
         renderer.destroy();
       } catch {
@@ -702,14 +715,14 @@ export async function runTuiDashboard(
         } else if (key.name === "space" && state.tab === "accounts") {
           state.expanded = !state.expanded;
           paint();
-        } else if (key.name === "return" && state.tab === "accounts") {
+        } else if (key.name === "return" && state.tab === "accounts" && live) {
           switchToSelected();
-        } else if (key.name === "a" && state.tab === "accounts") {
+        } else if (key.name === "a" && state.tab === "accounts" && live) {
           toggleAuto();
         } else if (/^[1-5]$/.test(key.name) && state.tab === "analytics") {
           state.timeframeIndex = Number(key.name) - 1;
           paint();
-        } else if (key.name === "r") {
+        } else if (key.name === "r" && live) {
           void reload(true);
         }
       } catch {

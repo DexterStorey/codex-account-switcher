@@ -536,7 +536,25 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
     const command = arguments_[0];
     switch (command) {
       case undefined:
-      case "dashboard":
+      case "dashboard": {
+        // Hidden fixture mode renders a synthetic scenario with a pinned clock
+        // for documentation and visual QA — no daemon, no network. See
+        // src/tui/fixtures.ts and assets/.
+        const fixtureName = process.env.TOKMAX_FIXTURE ?? option(arguments_, "--fixture");
+        if (fixtureName !== undefined && process.stdout.isTTY) {
+          const [{ buildScenario, FIXTURE_NOW }, { runTuiDashboard }] = await Promise.all([
+            import("./tui/fixtures.ts"),
+            import("./tui/dashboard.ts"),
+          ]);
+          const now = process.env.TOKMAX_NOW ? Number(process.env.TOKMAX_NOW) : FIXTURE_NOW;
+          await runTuiDashboard(context.paths.managerSocket, {
+            installed: process.env.TOKMAX_INSTALLED !== "false",
+            fixture: buildScenario(fixtureName, now),
+            now,
+          });
+          context.store.close();
+          process.exit(0);
+        }
         await ensureDaemon(context);
         if (process.stdout.isTTY) {
           const { runTuiDashboard } = await import("./tui/dashboard.ts");
@@ -550,6 +568,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           `${renderDashboard(await readDashboard(context.paths.managerSocket))}\n`,
         );
         return 0;
+      }
       case "help":
       case "--help":
       case "-h":
