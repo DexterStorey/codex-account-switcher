@@ -150,21 +150,6 @@ export const SwitchRecordSchema = z
   .strict();
 export type SwitchRecord = z.infer<typeof SwitchRecordSchema>;
 
-// One measured point of a usage window over time, for the dashboard sparkline.
-export const UsageHistoryPointSchema = z
-  .object({ at: z.number().int().nonnegative(), usedPercent: z.number().min(0).max(100) })
-  .strict();
-export type UsageHistoryPoint = z.infer<typeof UsageHistoryPointSchema>;
-
-export const UsageHistorySchema = z
-  .object({
-    windowId: z.string().min(1),
-    label: z.string().min(1),
-    points: z.array(UsageHistoryPointSchema),
-  })
-  .strict();
-export type UsageHistory = z.infer<typeof UsageHistorySchema>;
-
 export const DashboardSnapshotSchema = z
   .object({
     accounts: z.array(AccountSchema),
@@ -174,14 +159,3 @@ export const DashboardSnapshotSchema = z
   })
   .strict();
 export type DashboardSnapshot = z.infer<typeof DashboardSnapshotSchema>;
-
-// The dashboard snapshot plus each account's usage trend, for the live TUI.
-export const AnalyticsSnapshotSchema = z
-  .object({
-    snapshot: DashboardSnapshotSchema,
-    history: z.array(
-      z.object({ accountId: z.uuid(), windows: z.array(UsageHistorySchema) }).strict(),
-    ),
-  })
-  .strict();
-export type AnalyticsSnapshot = z.infer<typeof AnalyticsSnapshotSchema>;

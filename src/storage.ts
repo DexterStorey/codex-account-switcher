@@ -13,16 +13,12 @@ import {
   ProviderStateSchema,
   type SwitchRecord,
   SwitchRecordSchema,
-  type UsageHistory,
-  UsageHistoryPointSchema,
   type UsageSnapshot,
   UsageSnapshotSchema,
 } from "./domain.ts";
 import { ApplicationError } from "./errors.ts";
 
 type PersistedSchema<Type> = { parse(value: unknown): Type };
-
-const maxHistoryPoints = 60;
 
 export interface StateStore {
   close(): void;
@@ -40,7 +36,6 @@ export interface StateStore {
   listSwitchRecords(limit?: number): SwitchRecord[];
   saveSwitchRecord(record: SwitchRecord): void;
   commitSwitch(record: SwitchRecord, state: ProviderState): void;
-  usageHistory(accountId: string): UsageHistory[];
   dashboard(): DashboardSnapshot;
 }
 
@@ -135,15 +130,8 @@ function migrate(database: Database): void {
     CREATE INDEX IF NOT EXISTS switch_records_provider_created
       ON switch_records(provider, created_at DESC);
 
-    CREATE TABLE IF NOT EXISTS usage_history (
-      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-      window_id TEXT NOT NULL,
-      label TEXT NOT NULL,
-      points TEXT NOT NULL,
-      PRIMARY KEY (account_id, window_id)
-    );
-
     DROP TABLE IF EXISTS runtime_sessions;
+    DROP TABLE IF EXISTS usage_history;
   `);
 
   const accountColumns = new Set(
@@ -335,45 +323,11 @@ export function createStateStore(databasePath: string): StateStore {
         `Usage provider ${parsed.provider} does not match account provider ${account.provider}`,
       );
     }
-    const observedAtMillis = Date.parse(parsed.observedAt);
-    const record = database.transaction(() => {
-      database
-        .query(
-          "INSERT INTO usage_snapshots(account_id, observed_at, payload) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at, payload = excluded.payload",
-        )
-        .run(parsed.accountId, parsed.observedAt, serialize(parsed));
-      for (const window of parsed.windows) {
-        appendUsagePoint(parsed.accountId, window.id, window.label, {
-          at: observedAtMillis,
-          usedPercent: Math.max(0, Math.min(100, window.usedPercent)),
-        });
-      }
-    });
-    record.immediate();
-  }
-
-  // Keeps a bounded per-window trend for the dashboard sparkline; the newest
-  // maxHistoryPoints observations are retained.
-  function appendUsagePoint(
-    accountId: string,
-    windowId: string,
-    label: string,
-    point: { at: number; usedPercent: number },
-  ): void {
-    const existing = database
-      .query<{ points: string }, [string, string]>(
-        "SELECT points FROM usage_history WHERE account_id = ? AND window_id = ?",
-      )
-      .get(accountId, windowId);
-    const points =
-      existing === null ? [] : UsageHistoryPointSchema.array().parse(JSON.parse(existing.points));
-    points.push(point);
-    const trimmed = points.slice(-maxHistoryPoints);
     database
       .query(
-        "INSERT INTO usage_history(account_id, window_id, label, points) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, window_id) DO UPDATE SET label = excluded.label, points = excluded.points",
+        "INSERT INTO usage_snapshots(account_id, observed_at, payload) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET observed_at = excluded.observed_at, payload = excluded.payload",
       )
-      .run(accountId, windowId, label, JSON.stringify(trimmed));
+      .run(parsed.accountId, parsed.observedAt, serialize(parsed));
   }
 
   function listProviderStates(): ProviderState[] {
@@ -460,19 +414,6 @@ export function createStateStore(databasePath: string): StateStore {
       .immediate();
   }
 
-  function usageHistory(accountId: string): UsageHistory[] {
-    return database
-      .query<{ window_id: string; label: string; points: string }, [string]>(
-        "SELECT window_id, label, points FROM usage_history WHERE account_id = ? ORDER BY window_id",
-      )
-      .all(accountId)
-      .map((row) => ({
-        windowId: row.window_id,
-        label: row.label,
-        points: UsageHistoryPointSchema.array().parse(JSON.parse(row.points)),
-      }));
-  }
-
   function dashboard(): DashboardSnapshot {
     return database.transaction(() =>
       DashboardSnapshotSchema.parse({
@@ -500,7 +441,6 @@ export function createStateStore(databasePath: string): StateStore {
     listSwitchRecords,
     saveSwitchRecord,
     commitSwitch,
-    usageHistory,
     dashboard,
   };
 }

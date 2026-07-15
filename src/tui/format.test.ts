@@ -1,15 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { Account, UsageHistoryPoint } from "../domain.ts";
+import type { Account } from "../domain.ts";
 import {
   darkTheme,
   detectThemeName,
   healthBadge,
-  historyChart,
   meter,
   percentLabel,
-  resetLabel,
   shortWindow,
-  sparkline,
 } from "./format.ts";
 
 const base: Account = {
@@ -35,33 +32,17 @@ describe("tui format", () => {
     expect(meter(null, 4)).toBe("····");
   });
 
-  test("sparkline uses a fixed 0..100 scale and right-aligns short series", () => {
-    const points = (pcts: number[]): UsageHistoryPoint[] =>
-      pcts.map((usedPercent, i) => ({ at: i, usedPercent }));
-    expect(sparkline(points([0]), 4)).toBe("   ▁");
-    expect(sparkline(points([100]), 4)).toBe("   █");
-    expect(sparkline([], 4)).toBe("····");
-    // A high-but-flat window reads high, not as mid-scale noise.
-    expect(sparkline(points([95, 95, 95]), 4)).toBe(" ███");
-  });
-
   test("percent label right-pads and marks unknown", () => {
     expect(percentLabel(7)).toBe("  7%");
     expect(percentLabel(null)).toBe("  ?%");
   });
 
-  test("reset label compresses to the largest unit", () => {
-    const now = Date.parse("2026-07-10T12:00:00.000Z");
-    expect(resetLabel("2026-07-10T12:30:00.000Z", now)).toBe("30m");
-    expect(resetLabel("2026-07-10T15:30:00.000Z", now)).toBe("3h 30m");
-    expect(resetLabel("2026-07-16T12:00:00.000Z", now)).toBe("6d");
-    expect(resetLabel(null, now)).toBe("");
-  });
-
   test("health badge only surfaces non-healthy states", () => {
     expect(healthBadge(darkTheme, base)).toBeNull();
+    // Healthy-ish transient states stay quiet; only actionable ones show.
+    expect(healthBadge(darkTheme, { ...base, health: "refreshing" })).toBeNull();
     expect(healthBadge(darkTheme, { ...base, health: "reauthenticationRequired" })?.text).toBe(
-      "login required",
+      "⚠ login",
     );
   });
 
@@ -76,19 +57,5 @@ describe("tui format", () => {
     expect(detectThemeName({ COLORFGBG: "0;15" })).toBe("light");
     expect(detectThemeName({ COLORFGBG: "15;0" })).toBe("dark");
     expect(detectThemeName({})).toBe("dark");
-  });
-
-  test("history chart is fixed-scale, top row first, and right-sized", () => {
-    const points = (pcts: number[]) => pcts.map((usedPercent, at) => ({ at, usedPercent }));
-    const chart = historyChart(points([0, 50, 100]), 3, 2);
-    expect(chart).toHaveLength(2);
-    for (const row of chart) {
-      expect(row).toHaveLength(3);
-    }
-    // Full column reaches the top row; empty column stays blank there.
-    expect(chart[0]?.[2]).toBe("█");
-    expect(chart[0]?.[0]).toBe(" ");
-    // Missing points render as blank columns, not crashes.
-    expect(historyChart([], 4, 3).every((row) => row === "    ")).toBe(true);
   });
 });

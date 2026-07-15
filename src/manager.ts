@@ -137,17 +137,6 @@ export class AccountManager {
     return this.#store.dashboard();
   }
 
-  public analytics() {
-    const snapshot = this.#store.dashboard();
-    return {
-      snapshot,
-      history: snapshot.accounts.map((account) => ({
-        accountId: account.id,
-        windows: this.#store.usageHistory(account.id),
-      })),
-    };
-  }
-
   public activeAccount(provider: ProviderId): Account | null {
     const accountId = this.#store.findProviderState(provider).activeAccountId;
     return accountId === null ? null : this.#store.findAccount(accountId);
