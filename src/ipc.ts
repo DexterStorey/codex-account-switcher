@@ -91,10 +91,10 @@ async function dispatch(
       const parsed = PolicyParamsSchema.parse(params);
       return manager.setAutomationPolicy(parsed);
     }
-    case "account/replace": {
+    case "account/save": {
       const parsed = ReplaceCredentialParamsSchema.parse(params);
-      await manager.replaceAccountCredential(parsed);
-      return { replaced: true };
+      await manager.saveAccount(parsed);
+      return { saved: true };
     }
     default:
       throw new ApplicationError("METHOD_NOT_FOUND", `Unknown manager method ${method}`);
@@ -306,16 +306,16 @@ export function requestPolicy(
   }).then(() => undefined);
 }
 
-export function requestAccountReplace(
+export function requestAccountSave(
   socketPath: string,
   account: Account,
   removePrevious: { secretReference: string | null; profilePath: string | null },
 ): Promise<void> {
   return managerRequest({
     socketPath,
-    method: "account/replace",
+    method: "account/save",
     params: { account, removePrevious },
-    schema: z.object({ replaced: z.literal(true) }),
+    schema: z.object({ saved: z.literal(true) }),
     timeoutMilliseconds: 15_000,
   }).then(() => undefined);
 }

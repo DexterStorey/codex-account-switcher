@@ -145,6 +145,14 @@ export async function uninstallClaudeConfig(): Promise<string | null> {
   return path;
 }
 
+// True when the codex config carries the managed provider block — the marker
+// that native clients route through tokmax.
+export async function isInstalled(): Promise<boolean> {
+  return readFileOrEmpty(codexConfigPath()).then((content) =>
+    content.includes("model_providers.tokmax"),
+  );
+}
+
 export function configTargets(): { codex: string; claude: string } {
   return { codex: codexConfigPath(), claude: claudeSettingsPath() };
 }

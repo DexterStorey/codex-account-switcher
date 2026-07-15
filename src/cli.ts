@@ -1,40 +1,34 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
-  configTargets,
   installClaudeConfig,
   installCodexConfig,
+  isInstalled,
   uninstallClaudeConfig,
   uninstallCodexConfig,
 } from "./config-install.ts";
 import { acquireDaemonLock } from "./daemon-lock.ts";
-import { type Account, AccountEmailSchema } from "./domain.ts";
+import type { Account } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
 import {
   managerAvailable,
   managerRequest,
   readDashboard,
   readProxyPort,
-  requestAccountReplace,
+  requestAccountSave,
   requestSwitch,
   startManagerServer,
 } from "./ipc.ts";
 import { AccountManager } from "./manager.ts";
-import {
-  type ApplicationPaths,
-  applicationPaths,
-  ensureApplicationPaths,
-  proxyBaseUrl,
-} from "./paths.ts";
+import { type ApplicationPaths, applicationPaths, ensureApplicationPaths } from "./paths.ts";
 import { runCommand } from "./process.ts";
 import { registerClaudeAccount, removeClaudeProfile } from "./providers/claude/auth.ts";
 import { registerCodexAccount } from "./providers/codex/auth.ts";
 import { createMacOsKeychainVault } from "./providers/codex/keychain.ts";
-import { pickDefaultAccount } from "./selection.ts";
 import { createStateStore, type StateStore } from "./storage.ts";
 import { renderDashboard } from "./ui.ts";
 
@@ -59,10 +53,6 @@ function providerFromCli(value: string): "openai" | "anthropic" {
   }
 }
 
-function flag(arguments_: readonly string[], name: string): boolean {
-  return arguments_.includes(name);
-}
-
 function option(arguments_: readonly string[], name: string): string | undefined {
   const equals = arguments_.find((argument) => argument.startsWith(`${name}=`));
   if (equals !== undefined) {
@@ -73,37 +63,28 @@ function option(arguments_: readonly string[], name: string): string | undefined
 }
 
 function help(): string {
-  return `tokmax — accounts, rate limits, and safe switching for Codex and Claude Code
+  return `tokmax — juggle rate limits across your Codex and Claude Code accounts
 
-Accounts
-  tokmax codex login                      sign in another OpenAI account
-  tokmax claude login [--email a@b.com]   sign in another Anthropic account
-  tokmax <codex|claude> relogin <email>   repair an expired login
-  tokmax list                             all accounts and their health
-  tokmax whoami                           active account per provider
+Setup
+  tokmax login <codex|claude>              sign in an account (re-run to re-auth)
+  tokmax install                           route native codex & claude through tokmax
+  tokmax uninstall                         restore your original config
 
-Sessions
-  tokmax install                          route native codex/claude through tokmax
-  tokmax uninstall                        restore the original client config
-  tokmax codex [arguments...]             launch Codex on the active account
-  tokmax claude [arguments...]            launch Claude Code on the active account
+Everyday
+  tokmax                                   the live dashboard
+  tokmax switch <codex|claude> <email>     make an account active
+  tokmax auto <codex|claude|both> <on|off> [--threshold 95]
+  tokmax list                              accounts and their health
 
-Limits
-  tokmax                                  live dashboard
-  tokmax status [--json]                  one-shot snapshot
-  tokmax refresh                          re-probe every account now
-  tokmax switch <codex|claude> <email>    point every request at an account
-  tokmax auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]
+Details
+  tokmax status                            machine-readable JSON snapshot
+  tokmax refresh                           re-probe usage now
+  tokmax doctor                            check tools, proxy, and config
+  tokmax daemon <start|stop|status>        the background manager
 
-Plumbing
-  tokmax daemon <start|stop|status>       the manager that runs the proxy and probes
-  tokmax doctor                           verify local tools and config
-
-A local proxy injects the active account's credential into every request, so a
-switch takes effect on the next request — even mid-turn — and the clients run
-natively. After tokmax install, plain codex and claude route through it too.
-Automatic rotation is off by default; --authorized records your confirmation
-that your provider agreement permits it.`;
+Once installed, just use codex and claude normally: a local proxy swaps in the
+active account's credential per request, so a switch (manual or auto-rotate)
+takes effect on the very next request — even mid-turn — with no restart.`;
 }
 
 async function createContext(): Promise<ApplicationContext> {
@@ -243,129 +224,63 @@ async function ensureDaemon(context: ApplicationContext): Promise<void> {
 // A managed client launched with no active account would reach the provider's
 // own sign-in screen, whose login flow the managed boundary rejects. Select an
 // account first and say so.
-async function ensureActiveProviderAccount(
-  context: ApplicationContext,
-  provider: "openai" | "anthropic",
-  clientName: string,
-): Promise<void> {
-  await ensureDaemon(context);
-  const snapshot = await readDashboard(context.paths.managerSocket);
-  const state = snapshot.providers.find((candidate) => candidate.provider === provider);
-  if (state === undefined || state.activeAccountId !== null) {
-    return;
-  }
-  const loginName = provider === "openai" ? "codex" : "claude";
-  const accounts = snapshot.accounts.filter((account) => account.provider === provider);
-  if (accounts.length === 0) {
-    throw new ApplicationError(
-      "NO_ACCOUNTS",
-      `No ${loginName} account is registered yet. Run: tokmax ${loginName} login`,
-    );
-  }
-  const target = pickDefaultAccount({ accounts, usage: snapshot.usage });
-  if (target === null) {
-    throw new ApplicationError(
-      "NO_ACCOUNTS",
-      `No enabled ${loginName} account is available; check tokmax list`,
-    );
-  }
-  await requestSwitch(context.paths.managerSocket, provider, target.id);
-  process.stdout.write(
-    `Activated ${target.label} for ${clientName}. Change with: tokmax switch ${loginName} <email>\n`,
-  );
-}
-
-async function addAccount(
-  context: ApplicationContext,
-  arguments_: readonly string[],
-): Promise<void> {
-  const providerArgument = arguments_[0];
-  if (providerArgument === undefined) {
-    throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> login [--email address]");
-  }
-  const provider = providerFromCli(providerArgument);
-  const registration = parseRegistrationOptions(provider, arguments_.slice(1));
-  const account = await registerIsolatedAccount(context, provider, registration.email);
-  const duplicate = context.store
-    .listAccounts(provider)
-    .find(
-      (candidate) =>
-        candidate.externalAccountId !== null &&
-        candidate.externalAccountId === account.externalAccountId,
-    );
-  if (duplicate !== undefined) {
-    await removeUnstoredAccount(account);
-    throw new ApplicationError(
-      "DUPLICATE_ACCOUNT",
-      `This login is already registered as ${duplicate.label}`,
-    );
-  }
-  try {
-    context.store.saveAccount(account);
-  } catch (error) {
-    await removeUnstoredAccount(account);
-    throw error;
-  }
-  process.stdout.write(
-    `Registered ${account.label} without changing the active ${providerArgument} account.\n`,
-  );
-}
-
 function registerIsolatedAccount(
   context: ApplicationContext,
   provider: "openai" | "anthropic",
-  email: string | undefined,
 ): Promise<Account> {
   switch (provider) {
     case "openai":
       return registerCodexAccount({ vault: createMacOsKeychainVault() });
     case "anthropic":
-      return registerClaudeAccount({
-        email,
-        paths: context.paths,
-      });
+      return registerClaudeAccount({ paths: context.paths });
   }
 }
 
-function parseRegistrationOptions(
-  provider: "openai" | "anthropic",
-  arguments_: readonly string[],
-): { email: string | undefined } {
-  switch (provider) {
-    case "openai":
-      if (arguments_.length !== 0) {
-        throw new ApplicationError("USAGE", "Usage: tokmax codex login");
-      }
-      return { email: undefined };
-    case "anthropic":
-      switch (arguments_.length) {
-        case 0:
-          return { email: undefined };
-        case 1: {
-          const argument = arguments_[0];
-          if (argument?.startsWith("--email=") !== true) {
-            throw new ApplicationError(
-              "USAGE",
-              "Usage: tokmax claude login [--email user@example.com]",
-            );
-          }
-          return { email: AccountEmailSchema.parse(argument.slice("--email=".length)) };
-        }
-        case 2:
-          if (arguments_[0] !== "--email" || arguments_[1] === undefined) {
-            throw new ApplicationError(
-              "USAGE",
-              "Usage: tokmax claude login [--email user@example.com]",
-            );
-          }
-          return { email: AccountEmailSchema.parse(arguments_[1]) };
-        default:
-          throw new ApplicationError(
-            "USAGE",
-            "Usage: tokmax claude login [--email user@example.com]",
-          );
-      }
+// tokmax login <codex|claude>: runs the browser OAuth, then hands the result to
+// the daemon so it stays the single store writer. Idempotent — signing in an
+// account that already exists re-auths it in place (running sessions keep
+// working); a new account is added, and the first for a provider is activated
+// so native clients work immediately.
+async function login(
+  context: ApplicationContext,
+  providerArgument: string | undefined,
+): Promise<void> {
+  if (providerArgument === undefined) {
+    throw new ApplicationError("USAGE", "Usage: tokmax login <codex|claude>");
   }
+  const provider = providerFromCli(providerArgument);
+  await ensureDaemon(context);
+  const authenticated = await registerIsolatedAccount(context, provider);
+  const existing = context.store
+    .listAccounts(provider)
+    .find(
+      (candidate) =>
+        candidate.externalAccountId !== null &&
+        candidate.externalAccountId === authenticated.externalAccountId,
+    );
+  const account =
+    existing === undefined
+      ? authenticated
+      : {
+          ...authenticated,
+          id: existing.id,
+          enabled: existing.enabled,
+          createdAt: existing.createdAt,
+        };
+  try {
+    await requestAccountSave(context.paths.managerSocket, account, {
+      secretReference: existing?.secretReference ?? null,
+      profilePath: existing?.profilePath ?? null,
+    });
+  } catch (error) {
+    await removeUnstoredAccount(authenticated);
+    throw error;
+  }
+  process.stdout.write(
+    existing === undefined
+      ? `Signed in ${account.label}.\n`
+      : `Re-authenticated ${account.label}; live sessions pick it up on their next request.\n`,
+  );
 }
 
 async function removeUnstoredAccount(account: Account): Promise<void> {
@@ -375,62 +290,6 @@ async function removeUnstoredAccount(account: Account): Promise<void> {
   if (account.profilePath !== null) {
     await removeClaudeProfile(account.profilePath);
   }
-}
-
-async function reauthenticateAccount(
-  context: ApplicationContext,
-  arguments_: readonly string[],
-): Promise<void> {
-  const providerArgument = arguments_[0];
-  const accountReference = arguments_[1];
-  if (providerArgument === undefined || accountReference === undefined) {
-    throw new ApplicationError("USAGE", "Usage: tokmax <codex|claude> relogin <email-or-id>");
-  }
-  const provider = providerFromCli(providerArgument);
-  // Relogin is fully online: the daemon keeps hosting the proxy the whole time,
-  // so running sessions and the dashboard never drop. The interactive login
-  // runs here (it needs the terminal); the daemon performs the store swap.
-  await ensureDaemon(context);
-  const existing = resolveAccount(context.store, provider, accountReference);
-  if (existing.externalAccountId === null) {
-    throw new ApplicationError(
-      "IDENTITY_UNBOUND",
-      `${existing.label} has no stable provider identity and must be registered again`,
-    );
-  }
-  const registration = parseRegistrationOptions(provider, arguments_.slice(2));
-  const authenticated = await registerIsolatedAccount(context, provider, registration.email);
-  if (
-    authenticated.externalAccountId !== existing.externalAccountId ||
-    (existing.provider === "openai" &&
-      existing.externalUserId !== null &&
-      authenticated.provider === "openai" &&
-      authenticated.externalUserId !== existing.externalUserId)
-  ) {
-    await removeUnstoredAccount(authenticated);
-    throw new ApplicationError(
-      "IDENTITY_CHANGED",
-      `Login belongs to a different ${providerArgument} account than ${existing.label}`,
-    );
-  }
-  const replacement: Account = {
-    ...authenticated,
-    id: existing.id,
-    enabled: existing.enabled,
-    createdAt: existing.createdAt,
-  };
-  try {
-    await requestAccountReplace(context.paths.managerSocket, replacement, {
-      secretReference: existing.secretReference,
-      profilePath: existing.profilePath,
-    });
-  } catch (error) {
-    await removeUnstoredAccount(authenticated);
-    throw error;
-  }
-  process.stdout.write(
-    `Reauthenticated ${providerArgument} account ${replacement.label}; live sessions pick it up on their next request.\n`,
-  );
 }
 
 function resolveAccount(
@@ -448,22 +307,48 @@ function resolveAccount(
   return account;
 }
 
+const healthText: Record<Account["health"], string> = {
+  unchecked: "checking",
+  ready: "ready",
+  refreshDue: "refreshing",
+  refreshing: "refreshing",
+  loginExpiring: "login expiring soon",
+  scopeMissing: "missing a scope",
+  reauthenticationRequired: "login required — tokmax login",
+  temporarilyUnreachable: "provider unreachable",
+  usageRateLimited: "rate-limited",
+  disabled: "disabled",
+};
+
 function listAccounts(context: ApplicationContext): void {
   const states = new Map(
     context.store.listProviderStates().map((state) => [state.provider, state]),
   );
   const accounts = context.store.listAccounts();
   if (accounts.length === 0) {
-    process.stdout.write("No accounts registered.\n");
+    process.stdout.write(
+      "No accounts yet. Sign in with:  tokmax login codex   ·   tokmax login claude\n",
+    );
     return;
   }
-  for (const account of accounts) {
-    const active =
-      states.get(account.provider)?.activeAccountId === account.id ? "active" : "     ";
-    process.stdout.write(
-      `${active}  ${account.provider.padEnd(10)}  ${account.label.padEnd(32)}  ${account.health}\n`,
-    );
+  const width = Math.max(...accounts.map((account) => account.label.length));
+  for (const [provider, title] of [
+    ["openai", "codex"],
+    ["anthropic", "claude"],
+  ] as const) {
+    const group = accounts.filter((account) => account.provider === provider);
+    if (group.length === 0) {
+      continue;
+    }
+    process.stdout.write(`\n${title}\n`);
+    for (const account of group) {
+      const isActive = states.get(provider)?.activeAccountId === account.id;
+      process.stdout.write(
+        `  ${isActive ? "●" : " "} ${account.label.padEnd(width)}   ${healthText[account.health]}\n`,
+      );
+    }
   }
+  process.stdout.write("\n● = active\n");
 }
 
 async function switchAccount(
@@ -491,7 +376,7 @@ async function configureAutomation(
   if (providerArgument === undefined || (mode !== "on" && mode !== "off")) {
     throw new ApplicationError(
       "USAGE",
-      "Usage: tokmax auto <codex|claude|both> <on|off> [--threshold 95] [--authorized]",
+      "Usage: tokmax auto <codex|claude|both> <on|off> [--threshold 95]",
     );
   }
   const providers =
@@ -509,87 +394,43 @@ async function configureAutomation(
         provider,
         enabled: mode === "on",
         thresholdPercent,
-        authorizationConfirmed: flag(arguments_, "--authorized"),
+        // Enabling from the CLI is itself the confirmation, matching the
+        // dashboard's toggle; the ToS guidance lives in the docs.
+        authorizationConfirmed: mode === "on",
       },
       schema: z.unknown(),
     });
   }
   process.stdout.write(
-    `Automatic ${providerArgument} switching is ${mode === "on" ? "enabled" : "disabled"}${thresholdPercent === undefined ? "" : ` at ${thresholdPercent}%`}.\n`,
+    `Auto-rotate ${mode === "on" ? "on" : "off"} for ${providerArgument}${thresholdPercent === undefined ? "" : ` at ${thresholdPercent}%`}.\n`,
   );
-}
-
-function whoami(context: ApplicationContext): void {
-  const states = new Map(
-    context.store.listProviderStates().map((state) => [state.provider, state]),
-  );
-  for (const [provider, clientName] of [
-    ["openai", "codex"],
-    ["anthropic", "claude"],
-  ] as const) {
-    const state = states.get(provider);
-    const active =
-      state?.activeAccountId == null ? null : context.store.findAccount(state.activeAccountId);
-    process.stdout.write(
-      `${clientName.padEnd(7)} ${
-        active === null ? "no active account" : `${active.label} (gen ${state?.generation ?? 0})`
-      }\n`,
-    );
-  }
 }
 
 // Launch a native client. With config installed, plain `codex`/`claude` route
 // through the proxy too; the wrapper only adds account auto-selection and, for
 // safety, sets the base URL for this launch even if the user has not installed.
-async function launchNative(
-  context: ApplicationContext,
-  provider: "openai" | "anthropic",
-  arguments_: readonly string[],
-): Promise<number> {
-  await ensureActiveProviderAccount(context, provider, provider === "openai" ? "codex" : "claude");
-  const base = proxyBaseUrl(context.paths, provider);
-  if (provider === "openai") {
-    return Bun.spawn(
-      [
-        "codex",
-        "-c",
-        "model_provider=tokmax",
-        "-c",
-        `model_providers.tokmax={name="tokmax",base_url="${base}",wire_api="responses"}`,
-        ...arguments_,
-      ],
-      { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
-    ).exited;
-  }
-  return Bun.spawn(["claude", ...arguments_], {
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: base,
-      ANTHROPIC_AUTH_TOKEN: "managed-by-tokmax",
-    },
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
-}
-
 async function installConfig(context: ApplicationContext): Promise<void> {
   // Confirms the daemon (and its proxy) can start before pointing config at it.
   await ensureDaemon(context);
-  const codexPath = await installCodexConfig(context.paths);
-  const claudePath = await installClaudeConfig(context.paths);
+  await installCodexConfig(context.paths);
+  await installClaudeConfig(context.paths);
   process.stdout.write(
-    `Routed native Codex and Claude Code through tokmax:\n  ${codexPath}\n  ${claudePath}\nPlain \`codex\` and \`claude\` now use the active account. Undo with: tokmax uninstall\n`,
+    "Native codex and claude now route through tokmax.\n" +
+      "Just run `codex` or `claude` as usual — tokmax injects the active account.\n" +
+      "Undo any time with: tokmax uninstall\n",
   );
 }
 
 async function uninstallConfig(): Promise<void> {
-  const codexPath = await uninstallCodexConfig();
-  const claudePath = await uninstallClaudeConfig();
-  const targets = configTargets();
+  const codex = await uninstallCodexConfig();
+  const claude = await uninstallClaudeConfig();
+  if (codex === null && claude === null) {
+    process.stdout.write("tokmax was not installed; nothing to restore.\n");
+    return;
+  }
   process.stdout.write(
-    `${codexPath === null ? `No tokmax block in ${targets.codex}` : `Restored ${codexPath}`}\n` +
-      `${claudePath === null ? `No tokmax env in ${targets.claude}` : `Restored ${claudePath}`}\n`,
+    "Restored your original codex and claude config.\n" +
+      "Native clients no longer route through tokmax. Re-enable with: tokmax install\n",
   );
 }
 
@@ -618,12 +459,9 @@ async function doctor(context: ApplicationContext): Promise<void> {
       `${port === null ? "warning  " : "ok     "}  proxy    ${port === null ? "not listening" : `127.0.0.1:${port}`}\n`,
     );
   }
-  const targets = configTargets();
-  const installed = await readFile(targets.codex, "utf8")
-    .then((content) => content.includes("model_providers.tokmax"))
-    .catch(() => false);
+  const installed = await isInstalled();
   process.stdout.write(
-    `${installed ? "ok     " : "note   "}  config   ${installed ? "native Codex/Claude routed through tokmax" : "run tokmax install to route native codex/claude"}\n`,
+    `${installed ? "ok     " : "note   "}  config   ${installed ? "native codex & claude route through tokmax" : "run tokmax install to route native codex & claude"}\n`,
   );
   process.stdout.write(`state     ${context.paths.database}\n`);
   const legacyDirectories = [join(context.paths.root, "codex"), join(context.paths.root, "claude")];
@@ -652,7 +490,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         await ensureDaemon(context);
         if (process.stdout.isTTY) {
           const { runTuiDashboard } = await import("./tui/dashboard.ts");
-          await runTuiDashboard(context.paths.managerSocket);
+          await runTuiDashboard(context.paths.managerSocket, { installed: await isInstalled() });
           // The native renderer can leave the event loop alive after teardown;
           // exit deterministically so quitting never orphans the process.
           context.store.close();
@@ -667,20 +505,9 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
       case "-h":
         process.stdout.write(`${help()}\n`);
         return 0;
-      case "account":
-        switch (arguments_[1]) {
-          case "add":
-            await addAccount(context, arguments_.slice(2));
-            return 0;
-          case "reauthenticate":
-            await reauthenticateAccount(context, arguments_.slice(2));
-            return 0;
-          case "list":
-            listAccounts(context);
-            return 0;
-          default:
-            throw new ApplicationError("USAGE", "Usage: account <add|reauthenticate|list>");
-        }
+      case "login":
+        await login(context, arguments_[1]);
+        return 0;
       case "switch":
         await switchAccount(context, arguments_.slice(1));
         return 0;
@@ -695,43 +522,16 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
           schema: z.unknown(),
           timeoutMilliseconds: 60_000,
         });
-        process.stdout.write("Usage and health refreshed.\n");
+        process.stdout.write("Re-probed usage for every account.\n");
         return 0;
       case "status": {
         await ensureDaemon(context);
         const snapshot = await readDashboard(context.paths.managerSocket);
-        process.stdout.write(
-          flag(arguments_, "--json")
-            ? `${JSON.stringify(snapshot, null, 2)}\n`
-            : `${renderDashboard(snapshot)}\n`,
-        );
+        process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
         return 0;
       }
-      case "codex":
-        if (arguments_[1] === "login") {
-          await addAccount(context, ["codex", ...arguments_.slice(2)]);
-          return 0;
-        }
-        if (arguments_[1] === "relogin") {
-          await reauthenticateAccount(context, ["codex", ...arguments_.slice(2)]);
-          return 0;
-        }
-        return launchNative(context, "openai", arguments_.slice(1));
-      case "claude":
-        if (arguments_[1] === "login") {
-          await addAccount(context, ["claude", ...arguments_.slice(2)]);
-          return 0;
-        }
-        if (arguments_[1] === "relogin") {
-          await reauthenticateAccount(context, ["claude", ...arguments_.slice(2)]);
-          return 0;
-        }
-        return launchNative(context, "anthropic", arguments_.slice(1));
       case "list":
         listAccounts(context);
-        return 0;
-      case "whoami":
-        whoami(context);
         return 0;
       case "install":
         await installConfig(context);

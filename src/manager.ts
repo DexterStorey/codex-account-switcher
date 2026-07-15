@@ -153,11 +153,12 @@ export class AccountManager {
     return accountId === null ? null : this.#store.findAccount(accountId);
   }
 
-  // Relogin performs the interactive login in the CLI, then hands the fresh
-  // credential here so the daemon stays the single store writer and the proxy
-  // reads the new credential on the next request — no restart, no dropped
-  // sessions. The old profile/keychain item is removed only after the swap.
-  public async replaceAccountCredential(input: {
+  // `tokmax login` performs the interactive OAuth in the CLI, then hands the
+  // fresh account here so the daemon stays the single store writer and the
+  // proxy reads it on the next request — no restart, no dropped sessions. Used
+  // for both a new account and re-auth of an existing one (removePrevious set).
+  // The first account for a provider is activated so native clients work at once.
+  public async saveAccount(input: {
     account: Account;
     removePrevious: { secretReference: string | null; profilePath: string | null };
   }): Promise<void> {
@@ -169,6 +170,30 @@ export class AccountManager {
       }
       if (profilePath !== null && profilePath !== input.account.profilePath) {
         await removeClaudeProfile(profilePath).catch(() => undefined);
+      }
+      const state = this.#store.findProviderState(input.account.provider);
+      if (state.activeAccountId === null) {
+        const now = this.#dependencies.now().toISOString();
+        this.#store.commitSwitch(
+          SwitchRecordSchema.parse({
+            id: crypto.randomUUID(),
+            provider: input.account.provider,
+            sourceAccountId: null,
+            targetAccountId: input.account.id,
+            phase: "committed",
+            reason: "first-account",
+            generation: state.generation + 1,
+            message: null,
+            createdAt: now,
+            updatedAt: now,
+          }),
+          {
+            ...state,
+            activeAccountId: input.account.id,
+            generation: state.generation + 1,
+            switchedAt: now,
+          },
+        );
       }
     });
   }

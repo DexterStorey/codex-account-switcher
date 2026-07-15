@@ -149,7 +149,7 @@ function providerPanel(
           Box(
             { flexDirection: "row", width: "100%" },
             Text({
-              content: `   no accounts — tokmax ${providerCli[provider]} login`,
+              content: `   no accounts — tokmax login ${providerCli[provider]}`,
               fg: rgb(ctx.theme.dim),
             }),
           ),
@@ -368,6 +368,7 @@ function view(
   rows: Row[],
   selected: number,
   tab: Tab,
+  installed: boolean,
   note: string,
 ) {
   const now = Date.now();
@@ -404,6 +405,15 @@ function view(
         ? Text({ content: "" })
         : Text({ content: `   ${note}`, fg: rgb(ctx.theme.warn) }),
     ),
+    // Nothing routes through tokmax until installed — say so, loudly but once.
+    installed
+      ? Text({ content: "" })
+      : Text({
+          content: " native routing is off — run  tokmax install  to route codex & claude",
+          fg: rgb(ctx.theme.bg),
+          bg: rgb(ctx.theme.warn),
+          attributes: 1,
+        }),
     tabBar(ctx, tab),
     ...(tab === "overview"
       ? overviewBody(ctx, analytics.snapshot, rows, selected)
@@ -412,7 +422,10 @@ function view(
   );
 }
 
-export async function runTuiDashboard(socketPath: string): Promise<void> {
+export async function runTuiDashboard(
+  socketPath: string,
+  options: { installed: boolean },
+): Promise<void> {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
   // Follow the terminal's own background (OpenTUI queries it), which is the
   // real signal — not the OS appearance, which can differ from the terminal.
@@ -439,7 +452,15 @@ export async function runTuiDashboard(socketPath: string): Promise<void> {
     clampSelection();
     let next: ReturnType<typeof Box>;
     try {
-      next = view({ theme: currentTheme() }, analytics, rows, selected, tab, note);
+      next = view(
+        { theme: currentTheme() },
+        analytics,
+        rows,
+        selected,
+        tab,
+        options.installed,
+        note,
+      );
     } catch {
       return;
     }
