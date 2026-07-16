@@ -14,13 +14,9 @@ export const ApplicationPathsSchema = z.object({
 });
 export type ApplicationPaths = z.infer<typeof ApplicationPathsSchema>;
 
-// A fixed loopback port keeps the base_url written into ~/.codex and ~/.claude
-// stable across daemon restarts, so config is installed once.
 const defaultProxyPort = 8459;
 
 export function applicationPaths(environment: NodeJS.ProcessEnv = process.env): ApplicationPaths {
-  // The state home predates the tokmax name; existing installations keep it
-  // because the Claude profile Keychain items are keyed to these paths.
   const root = resolve(
     environment.TOKMAX_HOME ?? environment.CODEX_AUTH_HOME ?? join(homedir(), ".codex-auth"),
   );

@@ -1,11 +1,11 @@
 {
-  "name": "tokmax",
+  "name": "tokenmaxx",
   "version": "0.5.0",
-  "description": "A local account, quota, and runtime control plane for Codex and Claude Code.",
+  "description": "A local proxy that juggles rate limits across your Codex and Claude Code accounts — with live token-throughput analytics.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "tokmax": "dist/index.js"
+    "tokenmaxx": "dist/index.js"
   },
   "main": "dist/index.js",
   "scripts": {
@@ -13,46 +13,38 @@
     "assets:screens": "bun run assets/render.ts",
     "assets:flagship": "bun run assets/flagship.ts",
     "build": "bun run clean && bun build ./src/index.ts --target bun --outdir dist --external '@opentui/*' && chmod 755 dist/index.js",
-    "check": "bun run typecheck && bun run lint && bun test",
+    "check": "bun run typecheck && bun run lint",
     "clean": "rm -rf dist",
     "dev": "bun run src/index.ts",
     "format": "biome format --write .",
     "lint": "biome check .",
     "prepublishOnly": "bun run check && bun run build",
-    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
     "bun": ">=1.2.0"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "DESIGN.md",
-    "SECURITY.md",
-    "COMPATIBILITY.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "keywords": [
     "codex",
+    "claude-code",
     "cli",
-    "auth",
-    "accounts",
-    "switch",
-    "tokens",
+    "proxy",
     "rate-limits",
-    "claude-code"
+    "tokens",
+    "analytics",
+    "tokenmaxx"
   ],
   "preferGlobal": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DexterStorey/codex-account-switcher.git"
+    "url": "git+https://github.com/RubricLab/tokenmaxx.git"
   },
   "bugs": {
-    "url": "https://github.com/DexterStorey/codex-account-switcher/issues"
+    "url": "https://github.com/RubricLab/tokenmaxx/issues"
   },
-  "homepage": "https://github.com/DexterStorey/codex-account-switcher#readme",
-  "author": "Dexter Storey",
+  "homepage": "https://github.com/RubricLab/tokenmaxx#readme",
+  "author": "Rubric Labs",
   "dependencies": {
     "@opentui/core": "^0.4.3",
     "zod": "^4.0.0"

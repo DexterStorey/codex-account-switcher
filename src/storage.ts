@@ -24,15 +24,10 @@ import { ApplicationError } from "./errors.ts";
 
 type PersistedSchema<Type> = { parse(value: unknown): Type };
 
-// Enough spine for the multi-day analytics timeframes. At the active-account
-// probe cadence (60s) this is ~48h; idle accounts (5m) stretch further. Longer
-// timeframes fill in over time and carry the last reading forward across gaps.
 const maxHistoryPoints = 2880;
 const maxTokenEventAgeMs = 31 * 24 * 60 * 60 * 1000;
 const tokenBucketCount = 120;
 
-// Raw per-timeframe token aggregate from the store; the manager prices it into
-// the domain TokenTimeframe (adding cost, peak, breakdown).
 export interface TokenTimeframeAggregate {
   key: string;
   bucketMs: number;
@@ -259,7 +254,6 @@ export function createStateStore(databasePath: string): StateStore {
     }
   }
 
-  // One place turns a SELECT of JSON payloads into validated domain objects.
   function queryAll<Type>(
     schema: PersistedSchema<Type>,
     sql: string,
@@ -390,8 +384,6 @@ export function createStateStore(databasePath: string): StateStore {
       .immediate();
   }
 
-  // Retains the newest maxHistoryPoints observations per window for the trend
-  // charts, bounded so the table cannot grow without limit.
   function appendUsagePoint(
     accountId: string,
     windowId: string,

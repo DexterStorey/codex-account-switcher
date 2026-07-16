@@ -64,10 +64,6 @@ function resetTimestamp(value: string | number | null | undefined): string | nul
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
-// The endpoint has shipped both fractions (0.94 for 94%) and whole percentages
-// (9.0 for 9%). Values above 1 can only be percentages; values at or below 1
-// are treated as fractions, which at worst over-reports a sub-1% reading and
-// never hides a nearly exhausted window.
 function normalizePercent(utilization: number): number {
   const percent = utilization <= 1 ? utilization * 100 : utilization;
   return Math.min(100, percent);

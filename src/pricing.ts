@@ -3,9 +3,6 @@ export interface ModelPrice {
   outputPerMTok: number;
 }
 
-// API list prices (USD per million tokens), matched by model-name prefix. These
-// power the "≈ API value" figure — what the tokens would cost at public API
-// rates, i.e. the value extracted from a flat subscription. Estimates; edit here.
 const PRICES: ReadonlyArray<{ match: string; price: ModelPrice }> = [
   { match: "claude-opus", price: { inputPerMTok: 15, outputPerMTok: 75 } },
   { match: "claude-sonnet", price: { inputPerMTok: 3, outputPerMTok: 15 } },

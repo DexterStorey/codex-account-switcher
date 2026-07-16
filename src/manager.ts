@@ -151,8 +151,6 @@ export class AccountManager {
     this.#proxy = startProxy({
       source,
       port: this.#paths.proxyPort,
-      // Metering: attribute the observed tokens to whichever account is active
-      // for that provider. Wrapped so a store error can never affect proxying.
       record: (event) => {
         try {
           this.#store.recordTokenEvent({
@@ -211,11 +209,6 @@ export class AccountManager {
     return accountId === null ? null : this.#store.findAccount(accountId);
   }
 
-  // `tokmax login` performs the interactive OAuth in the CLI, then hands the
-  // fresh account here so the daemon stays the single store writer and the
-  // proxy reads it on the next request — no restart, no dropped sessions. Used
-  // for both a new account and re-auth of an existing one (removePrevious set).
-  // The first account for a provider is activated so native clients work at once.
   public async saveAccount(input: {
     account: Account;
     removePrevious: { secretReference: string | null; profilePath: string | null };
@@ -287,10 +280,6 @@ export class AccountManager {
     this.#store.saveAccount(result.account);
   }
 
-  // A switch is now a validated state update: the proxy reads the active
-  // account per request, so pointing every subsequent request at the target
-  // is all that is required. The target is probed first so a switch never
-  // commits to an unusable credential.
   public async switchAccount(
     provider: ProviderId,
     targetAccountId: string,
@@ -330,9 +319,6 @@ export class AccountManager {
       if (this.#dependencies.now().getTime() < cooldownUntil) {
         continue;
       }
-      // Only the active account needs minute-level freshness (it drives
-      // rotation); idle accounts get coarse readings so many registered
-      // accounts do not multiply the provider's probe traffic.
       const isActive =
         this.#store.findProviderState(account.provider).activeAccountId === account.id;
       const probeInterval = isActive ? 0 : 5 * 60_000;
@@ -398,8 +384,6 @@ export class AccountManager {
     });
   }
 
-  // Every activation — first account, manual switch, automatic rotation — writes
-  // the same committed switch record and advances the provider's generation.
   private commitActivation(input: {
     provider: ProviderId;
     state: ProviderState;

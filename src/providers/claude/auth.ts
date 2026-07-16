@@ -20,8 +20,6 @@ export const ClaudeOauthSchema = z
   .passthrough();
 export type ClaudeOauth = z.infer<typeof ClaudeOauthSchema>;
 
-// The subscription tier for display. Prefer the rate-limit tier when it carries
-// a multiplier (e.g. max_20x); otherwise the coarse subscription type.
 export function claudePlanTier(credential: {
   subscriptionType?: string;
   rateLimitTier?: string;
@@ -171,9 +169,6 @@ export function defaultClaudeCredentialReader(
           );
         }
       }
-      // A failed refresh can leave Claude's credential store holding empty
-      // token strings; that is a dead login needing tokmax relogin, not a
-      // schema bug worth a Zod dump in every probe cycle.
       let decoded: unknown;
       try {
         decoded = JSON.parse(serialized);

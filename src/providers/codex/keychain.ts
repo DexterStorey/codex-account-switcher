@@ -6,11 +6,6 @@ const defaultService = "com.rubriclabs.tokmax";
 const base64Pattern = /^[A-Za-z0-9+/]+={0,2}$/;
 const identifierPattern = /^[\w.@:-]+$/;
 
-// `security -i` reads each interactive command into a fixed 4096-byte line
-// buffer (verified empirically: a 4030-character payload round-trips, 4050
-// fails), so large credentials are stored as multiple items of this many
-// base64 characters. 2048 is a multiple of 4, keeping `=` padding in the
-// final slice only.
 const chunkLength = 2_048;
 const maximumChunkCount = 64;
 const manifestPrefix = "tokmax-chunks:";
@@ -47,8 +42,6 @@ function defaultKeychainCommandRunner(): KeychainCommandRunner {
   };
 }
 
-// security echoes unrecognized input back in its diagnostics, which would put
-// credential material in an error message. Long base64 runs are secrets here.
 function redactSecrets(diagnostic: string): string {
   const redacted = diagnostic.replace(/[A-Za-z0-9+/=]{32,}/g, "[redacted]").trim();
   return redacted.length > 300 ? `${redacted.slice(0, 299)}…` : redacted;
@@ -100,10 +93,6 @@ export function createMacOsKeychainVault(
   }
 
   async function writeItem(itemName: string, encoded: string): Promise<void> {
-    // A bare trailing `-w` prompts on the controlling terminal and passing the
-    // secret as an argument would expose it in argv. Interactive command mode
-    // reads the whole command from stdin instead; the base64 payload keeps it
-    // inside `security`'s unquoted token grammar and under its line buffer.
     const command = `add-generic-password -U -s ${service} -a ${itemName} -w ${encoded}\n`;
     const result = await runner.run(["security", "-i"], command);
     if (result.exitCode !== 0) {
@@ -189,8 +178,6 @@ export function createMacOsKeychainVault(
           `Credential exceeds ${maximumChunkCount} keychain chunks`,
         );
       }
-      // Chunks first, manifest last: a reader never sees a manifest whose
-      // chunks have not all been written yet.
       for (let index = 0; index < chunkCount; index += 1) {
         await writeItem(
           `${reference}:${index}`,

@@ -273,8 +273,6 @@ export function requestSwitch(
     method: "provider/switch",
     params: { provider, targetAccountId, reason: "manual" },
     schema: DashboardSnapshotSchema,
-    // The switch itself is a store update; the budget covers one probe of the
-    // target credential to confirm it is usable before committing.
     timeoutMilliseconds: 30_000,
   });
 }

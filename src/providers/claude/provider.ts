@@ -50,8 +50,6 @@ function assertIdentity(
 export class AnthropicProviderAdapter implements ProviderAdapter {
   public readonly provider = "anthropic" as const;
   readonly #dependencies: AnthropicProviderDependencies;
-  // An access token maps to exactly one upstream account, so identity only
-  // needs re-verification when the token changes.
   readonly #verifiedIdentities = new Map<
     string,
     { accessToken: string; accountId: string; email: string | null }

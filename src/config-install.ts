@@ -4,9 +4,6 @@ import { dirname, join } from "node:path";
 import type { ApplicationPaths } from "./paths.ts";
 import { proxyBaseUrl } from "./paths.ts";
 
-// tokmax routes the native clients through its proxy by editing their real
-// config files, wrapped in restorable managed blocks so uninstall is exact.
-
 const codexBeginMarker = "# >>> tokmax managed (do not edit) >>>";
 const codexEndMarker = "# <<< tokmax managed <<<";
 const dummyAuthToken = "managed-by-tokmax";
@@ -23,8 +20,6 @@ async function readFileOrEmpty(path: string): Promise<string> {
   return readFile(path, "utf8").catch(() => "");
 }
 
-// Removes a previous managed block and neutralizes any active top-level
-// model_provider so ours is unambiguous; both are restored on uninstall.
 function stripCodexManagedBlock(content: string): string {
   const begin = content.indexOf(codexBeginMarker);
   const end = content.indexOf(codexEndMarker);
@@ -145,8 +140,6 @@ export async function uninstallClaudeConfig(): Promise<string | null> {
   return path;
 }
 
-// True when the codex config carries the managed provider block — the marker
-// that native clients route through tokmax.
 export async function isInstalled(): Promise<boolean> {
   return readFileOrEmpty(codexConfigPath()).then((content) =>
     content.includes("model_providers.tokmax"),

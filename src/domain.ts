@@ -24,8 +24,6 @@ const AccountFieldsSchema = z.object({
   label: AccountEmailSchema,
   identity: AccountEmailSchema,
   externalAccountId: z.string().trim().min(1).nullable(),
-  // Subscription tier as reported by the provider (codex plan_type / claude
-  // subscription tier). Optional: older stored accounts predate it.
   plan: z.string().trim().min(1).nullish(),
   health: HealthStateSchema,
   enabled: z.boolean(),
@@ -156,7 +154,6 @@ export const DashboardSnapshotSchema = z
   .strict();
 export type DashboardSnapshot = z.infer<typeof DashboardSnapshotSchema>;
 
-// A measured point of a usage window over time, for the analytics charts.
 export const UsageHistoryPointSchema = z
   .object({ at: z.number().int().nonnegative(), usedPercent: z.number().min(0).max(100) })
   .strict();
@@ -171,7 +168,6 @@ export const UsageHistorySchema = z
   .strict();
 export type UsageHistory = z.infer<typeof UsageHistorySchema>;
 
-// Analytics timeframes, shared by the store, manager, and TUI.
 export interface Timeframe {
   key: string;
   label: string;
@@ -185,7 +181,6 @@ export const TIMEFRAMES: readonly Timeframe[] = [
   { key: "31d", label: "31d", ms: 31 * 24 * 3_600_000 },
 ];
 
-// One request's measured token usage, recorded by the proxy as it streams by.
 export const TokenEventSchema = z
   .object({
     at: z.number().int().nonnegative(),
@@ -202,8 +197,6 @@ const TokenProviderTotalSchema = z
   .object({ tokens: z.number().nonnegative(), costUsd: z.number().nonnegative() })
   .strict();
 
-// Combined token throughput for one timeframe: `buckets` are token totals per
-// evenly-spaced time bucket (all accounts, both providers), plus headline totals.
 export const TokenTimeframeSchema = z
   .object({
     key: z.string(),

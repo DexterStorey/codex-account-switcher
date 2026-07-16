@@ -6,16 +6,11 @@ export interface ProviderProbeResult {
   usage: UsageSnapshot;
 }
 
-// Adapters now only read usage and health. Running sessions get their
-// credentials from the proxy, so there is no runtime to activate or drain.
 export interface ProviderAdapter {
   readonly provider: ProviderId;
   probe(account: Account): Promise<ProviderProbeResult>;
 }
 
-// Narrow an account to one provider's variant. The runtime guard makes the cast
-// safe; an adapter handed the wrong provider's account fails loudly instead of
-// silently mis-injecting a credential.
 export function requireProvider<P extends ProviderId>(
   account: Account,
   provider: P,

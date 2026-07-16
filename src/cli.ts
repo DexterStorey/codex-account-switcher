@@ -63,7 +63,6 @@ function option(arguments_: readonly string[], name: string): string | undefined
 }
 
 function help(): string {
-  // Color only for an interactive terminal; a pipe or NO_COLOR gets clean text.
   const color =
     process.stdout.isTTY === true &&
     process.env.NO_COLOR === undefined &&
@@ -72,8 +71,6 @@ function help(): string {
   const accent = (text: string) => sgr("38;2;90;176;255", text);
   const dim = (text: string) => sgr("38;2;139;147;161", text);
   const head = (text: string) => sgr("1", text);
-  // Descriptions align at a fixed column; a command wider than the field drops
-  // its description to the next line so nothing spills past 80 columns.
   const field = 32;
   const gutter = " ".repeat(field + 2);
   const row = (name: string, ...lines: string[]): string => {
@@ -129,17 +126,9 @@ async function createContext(): Promise<ApplicationContext> {
 }
 
 async function runDaemon(context: ApplicationContext): Promise<void> {
-  // The daemon must not inherit a user project directory: a daemon parked in
-  // directory: Codex threads started without an explicit cwd fall back to the
-  // app-server's, and a daemon parked in a repo also pins that directory.
   try {
     process.chdir(homedir());
-  } catch {
-    // An unreadable home directory is not worth refusing to start over.
-  }
-  // The daemon must outlive any single failed probe or child process; Bun
-  // exits on unhandled rejections by default, which silently stops all
-  // probing until someone next runs a tokmax command.
+  } catch {}
   process.on("unhandledRejection", (reason) => {
     process.stderr.write(`unhandled rejection: ${errorMessage(reason)}\n`);
   });
@@ -191,9 +180,6 @@ async function startDaemon(context: ApplicationContext): Promise<void> {
   }
   const logDescriptor = openSync(join(context.paths.runtime, "daemon.log"), "a", 0o600);
   try {
-    // A stopping daemon releases its startup lock only after a full drain, so
-    // a freshly spawned manager can lose the lock race and exit. Spawn again
-    // instead of failing the whole start.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const child = spawn(process.execPath, [entrypoint, "daemon", "run"], {
         detached: true,
@@ -232,8 +218,6 @@ async function stopDaemon(context: ApplicationContext): Promise<void> {
     schema: EmptyResultSchema,
     timeoutMilliseconds: 1_000,
   });
-  // Wait for the drain to finish so `daemon stop && daemon start` and the
-  // stopped-manager requirement for relogin are race-free.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const running = await managerAvailable(context.paths.managerSocket);
@@ -256,9 +240,6 @@ async function ensureDaemon(context: ApplicationContext): Promise<void> {
   }
 }
 
-// A managed client launched with no active account would reach the provider's
-// own sign-in screen, whose login flow the managed boundary rejects. Select an
-// account first and say so.
 function registerIsolatedAccount(
   context: ApplicationContext,
   provider: "openai" | "anthropic",
@@ -271,11 +252,6 @@ function registerIsolatedAccount(
   }
 }
 
-// tokmax login <codex|claude>: runs the browser OAuth, then hands the result to
-// the daemon so it stays the single store writer. Idempotent — signing in an
-// account that already exists re-auths it in place (running sessions keep
-// working); a new account is added, and the first for a provider is activated
-// so native clients work immediately.
 async function login(
   context: ApplicationContext,
   providerArgument: string | undefined,
@@ -436,12 +412,8 @@ async function configureAutomation(
         provider,
         enabled: mode === "on",
         thresholdPercent,
-        // Enabling from the CLI is itself the confirmation, matching the
-        // dashboard's toggle; the ToS guidance lives in the docs.
         authorizationConfirmed: mode === "on",
       },
-      // The manager echoes the stored provider state so we report the threshold
-      // actually in force, not just the one passed on this invocation.
       schema: z.object({ policy: z.object({ thresholdPercent: z.number() }) }),
     });
     effectiveThreshold = state.policy.thresholdPercent;
@@ -456,11 +428,7 @@ async function configureAutomation(
   }
 }
 
-// Launch a native client. With config installed, plain `codex`/`claude` route
-// through the proxy too; the wrapper only adds account auto-selection and, for
-// safety, sets the base URL for this launch even if the user has not installed.
 async function installConfig(context: ApplicationContext): Promise<void> {
-  // Confirms the daemon (and its proxy) can start before pointing config at it.
   await ensureDaemon(context);
   await installCodexConfig(context.paths);
   await installClaudeConfig(context.paths);
@@ -537,9 +505,6 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
     switch (command) {
       case undefined:
       case "dashboard": {
-        // Hidden fixture mode renders a synthetic scenario with a pinned clock
-        // for documentation and visual QA — no daemon, no network. See
-        // src/tui/fixtures.ts and assets/.
         const fixtureName = process.env.TOKMAX_FIXTURE ?? option(arguments_, "--fixture");
         if (fixtureName !== undefined && process.stdout.isTTY) {
           const [{ buildScenario, FIXTURE_NOW }, { runTuiDashboard }] = await Promise.all([
@@ -559,8 +524,6 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
         if (process.stdout.isTTY) {
           const { runTuiDashboard } = await import("./tui/dashboard.ts");
           await runTuiDashboard(context.paths.managerSocket, { installed: await isInstalled() });
-          // The native renderer can leave the event loop alive after teardown;
-          // exit deterministically so quitting never orphans the process.
           context.store.close();
           process.exit(0);
         }

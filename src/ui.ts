@@ -64,8 +64,6 @@ function miniBar(paint: Painter, usedPercent: number, width = 8): string {
   )}`;
 }
 
-// Rows must stay one line even with three windows, so labels compress to
-// their most distinctive token: "GPT-5.3-Codex-Spark" → "Spark".
 function shortWindowLabel(window: UsageWindow): string {
   const label = window.label;
   if (/^(5 hour|5h session|five hour)$/i.test(label)) {
@@ -135,8 +133,6 @@ function sampleAge(observedAt: string, now: Date): string | null {
   return hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }
 
-// Health advice for anything other than a quietly healthy account; healthy
-// rows stay about usage, not plumbing.
 function healthNote(account: Account): { note: string; severity: AnsiCode } | null {
   const relogin = `tokmax ${providerCliName(account.provider)} relogin ${truncate(account.label, 40)}`;
   switch (account.health) {

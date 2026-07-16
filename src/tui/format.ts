@@ -1,7 +1,4 @@
-import type { Account, UsageHistoryPoint } from "../domain.ts";
-
-// Pure presentation helpers shared by the TUI. No terminal or OpenTUI
-// dependency, so they stay trivially testable and deterministic.
+import type { Account } from "../domain.ts";
 
 export interface Theme {
   fg: string;
@@ -48,9 +45,6 @@ export const lightTheme: Theme = {
 export type ThemeName = "dark" | "light";
 export const themes: Record<ThemeName, Theme> = { dark: darkTheme, light: lightTheme };
 
-// Picks the starting theme from an explicit override, else the terminal's
-// reported background (COLORFGBG is "fg;bg"; bg >= 7 is a light palette),
-// else dark.
 export function detectThemeName(environment: NodeJS.ProcessEnv): ThemeName {
   const override = environment.TOKMAX_THEME?.toLowerCase();
   if (override === "light" || override === "dark") {
@@ -94,74 +88,11 @@ export function percentLabel(usedPercent: number | null): string {
 export type { Timeframe } from "../domain.ts";
 export { TIMEFRAMES } from "../domain.ts";
 
-// Resample a time series onto `columns` evenly-spaced buckets over the window
-// [nowMillis - spanMillis, nowMillis]. Empty buckets carry the last known
-// reading forward so the line stays continuous even when probes are sparse;
-// columns before the first-ever sample stay null (nothing to draw yet).
-export function bucketSeries(
-  points: readonly UsageHistoryPoint[],
-  spanMillis: number,
-  nowMillis: number,
-  columns: number,
-): (number | null)[] {
-  const start = nowMillis - spanMillis;
-  const result: (number | null)[] = new Array(columns).fill(null);
-  // Points are appended in observation order, so the last write per bucket wins.
-  for (const point of points) {
-    if (point.at < start || point.at > nowMillis) {
-      continue;
-    }
-    const index = Math.min(
-      columns - 1,
-      Math.max(0, Math.floor(((point.at - start) / spanMillis) * columns)),
-    );
-    result[index] = clamp(point.usedPercent);
-  }
-  // Seed carry-forward from the most recent sample before the window opens.
-  let carry: number | null = null;
-  for (const point of points) {
-    if (point.at < start) {
-      carry = clamp(point.usedPercent);
-    } else {
-      break;
-    }
-  }
-  for (let column = 0; column < columns; column += 1) {
-    const value = result[column];
-    if (value === null || value === undefined) {
-      result[column] = carry;
-    } else {
-      carry = value;
-    }
-  }
-  return result;
-}
-
-// Collapse several windows' histories into one "pressure" series: the max
-// utilization across the given windows at each shared observation timestamp.
-export function mergedPressureSeries(
-  windows: readonly { points: readonly UsageHistoryPoint[] }[],
-): UsageHistoryPoint[] {
-  const byAt = new Map<number, number>();
-  for (const window of windows) {
-    for (const point of window.points) {
-      byAt.set(point.at, Math.max(byAt.get(point.at) ?? 0, clamp(point.usedPercent)));
-    }
-  }
-  return [...byAt.entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([at, usedPercent]) => ({ at, usedPercent }));
-}
-
 const brailleDots: readonly [number, number, number, number][] = [
   [0x01, 0x02, 0x04, 0x40], // left column, rows top→bottom
   [0x08, 0x10, 0x20, 0x80], // right column
 ];
 
-// A connected line chart drawn with braille cells (2× horizontal, 4× vertical
-// resolution per character). `columns` holds one value (0..100) or null per
-// braille sub-column — pass width*2 of them. Adjacent points are joined with a
-// vertical run so the trace reads as a continuous line. Returned top row first.
 export function brailleLine(
   columns: readonly (number | null)[],
   width: number,
@@ -217,7 +148,6 @@ export function brailleLine(
   return rows;
 }
 
-// A compact "resets in 2h 14m" countdown; null when the window has no reset.
 export function resetCountdown(resetAtIso: string | null, nowMillis: number): string | null {
   if (resetAtIso === null) {
     return null;
@@ -244,7 +174,6 @@ export function resetCountdown(resetAtIso: string | null, nowMillis: number): st
   return remainderHours === 0 ? `${days}d` : `${days}d ${remainderHours}h`;
 }
 
-// Prettify a raw provider plan string: "pro" → "Pro", "claude_max_20x" → "Max 20×".
 export function planLabel(plan: string | null | undefined): string | null {
   if (plan === null || plan === undefined) {
     return null;
@@ -285,7 +214,6 @@ export interface HealthBadge {
   color: string;
 }
 
-// Short, fixed-length tags so an unhealthy account never overflows its line.
 export function healthBadge(theme: Theme, account: Account): HealthBadge | null {
   switch (account.health) {
     case "ready":
@@ -328,9 +256,6 @@ export function clamp(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
-// Resample fixed-count throughput buckets onto `columns` chart cells, taking the
-// max of each source range so a spike survives downsampling and no cell reads a
-// false zero when upsampling. Unlike bucketSeries, gaps stay 0 (nothing = flat).
 export function throughputColumns(buckets: readonly number[], columns: number): number[] {
   const count = buckets.length;
   const result = new Array<number>(Math.max(0, columns)).fill(0);
@@ -349,7 +274,6 @@ export function throughputColumns(buckets: readonly number[], columns: number): 
   return result;
 }
 
-// 1234 → "1.2k", 1_500_000 → "1.5M".
 export function compactNumber(value: number): string {
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) {

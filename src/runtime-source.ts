@@ -29,9 +29,6 @@ function accessExpiry(auth: CodexAuth): number | null {
   return identity.accessExpiresAt === null ? null : Date.parse(identity.accessExpiresAt);
 }
 
-// Turns the active account of each provider into the upstream + headers the
-// proxy injects. Reuses the same credential store and refresh paths the
-// daemon's probes use, so there is one refresh owner per credential.
 export function createRuntimeCredentialSource(
   dependencies: RuntimeSourceDependencies,
 ): ProxyCredentialSource {
@@ -83,9 +80,7 @@ export function createRuntimeCredentialSource(
     return {
       baseUrl: upstreamFor("anthropic"),
       headers: { authorization: `Bearer ${credential.accessToken}` },
-      // Subscription OAuth requires this beta; merge it with the client's own.
       appendHeaders: { "anthropic-beta": "oauth-2025-04-20" },
-      // The client may carry a stray API key; the injected bearer must win.
       stripHeaders: ["x-api-key"],
     };
   }
@@ -103,9 +98,6 @@ export function createRuntimeCredentialSource(
         ? await openAiInjection(account, forceRefresh)
         : await anthropicInjection(account, forceRefresh);
     } catch (error) {
-      // The active credential is unusable (expired refresh token, revoked
-      // login). Surface one actionable line instead of the raw failure so a
-      // client shows the fix rather than a stack.
       const cli = provider === "openai" ? "codex" : "claude";
       throw new ApplicationError(
         "ACTIVE_CREDENTIAL_UNUSABLE",

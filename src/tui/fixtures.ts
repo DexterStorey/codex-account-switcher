@@ -15,8 +15,6 @@ import {
 import { costUsd } from "../pricing.ts";
 import { clamp } from "./format.ts";
 
-// Believable combined token throughput for the analytics screenshots. `scale` 0
-// yields an empty dashboard (onboarding). Buckets are deterministic bursts.
 function buildTokens(scale: number): TokenAnalytics {
   const timeframes = TIMEFRAMES.map((timeframe, seed) => {
     const hours = timeframe.ms / HOUR;
@@ -67,34 +65,21 @@ function buildTokens(scale: number): TokenAnalytics {
   return { timeframes };
 }
 
-// Synthetic dashboards for documentation and visual QA. These build fully valid
-// AnalyticsSnapshots — the exact shape the daemon serves over IPC — so the real
-// TUI can render believable state without a live daemon, deterministically.
-// Every snapshot is re-validated against the schema before it is returned, so a
-// fixture can never drift from the production contract.
-
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
-// A fixed reference clock so a scenario renders identically on every run unless
-// the caller passes its own `now`. 2026-07-15 09:42 in US/Pacific.
 export const FIXTURE_NOW = Date.parse("2026-07-15T16:42:00.000Z");
 
 function uuid(n: number): string {
   return `00000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;
 }
 
-// Deterministic hash noise in [-1, 1] (the classic fract-sin hash), so history
-// wobbles organically without Math.random breaking reproducibility.
 function noise(index: number): number {
   const x = Math.sin(index * 12.9898) * 43_758.5453;
   return (x - Math.floor(x)) * 2 - 1;
 }
 
-// One usage window's behaviour over time. `period` is the reset cadence, `peak`
-// the value it fills toward, `nowFrac` where in the current cycle we are right
-// now (so the live reading and the next reset are consistent with the history).
 interface WindowSpec {
   id: string;
   label: string;
@@ -124,8 +109,6 @@ function toWindow(spec: WindowSpec, now: number): UsageWindow {
   };
 }
 
-// Hourly points across the last month, thickening to every 10 minutes over the
-// last day so 1h/5h/24h read smoothly while 7d/31d still have coverage.
 function toHistory(spec: WindowSpec, now: number): UsageHistory {
   const points: UsageHistoryPoint[] = [];
   const start = now - 31 * DAY;
@@ -245,8 +228,6 @@ function assemble(
   });
 }
 
-// Reusable window shapes. 5-hour windows sawtooth every five hours; weekly
-// windows ramp slowly across seven days.
 const fiveHour = (peak: number, nowFrac: number, seed: number): WindowSpec => ({
   id: "five-hour",
   label: "5 hour",
@@ -284,8 +265,6 @@ const claudeSession = (peak: number, nowFrac: number, seed: number): WindowSpec 
 
 type ScenarioBuilder = (now: number) => AnalyticsSnapshot;
 
-// A relaxed steady state: both providers healthy, moderate usage, headroom to
-// spare. The everyday "everything's fine" view.
 const cruising: ScenarioBuilder = (now) =>
   assemble(
     now,
@@ -325,8 +304,6 @@ const cruising: ScenarioBuilder = (now) =>
     ],
   );
 
-// The active Codex account is nearly out of its 5-hour window — the moment
-// auto-rotation is about to earn its keep. A cooler standby waits below.
 const oneHot: ScenarioBuilder = (now) =>
   assemble(
     now,
@@ -366,8 +343,6 @@ const oneHot: ScenarioBuilder = (now) =>
     ],
   );
 
-// Just after a rotation: the fresh account is active and cool, the previously
-// hot one has dropped to standby, generation bumped and switch time recent.
 const rotated: ScenarioBuilder = (now) =>
   assemble(
     now,
@@ -407,7 +382,6 @@ const rotated: ScenarioBuilder = (now) =>
     ],
   );
 
-// A brand-new install: no accounts registered yet, nothing routing.
 const onboarding: ScenarioBuilder = (now) =>
   assemble(
     now,

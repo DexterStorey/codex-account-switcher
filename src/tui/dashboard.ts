@@ -90,8 +90,6 @@ function orderedRows(snapshot: DashboardSnapshot): Row[] {
   return rows;
 }
 
-// One account line showing every window inline, each colored by its pressure,
-// so all rates stay visible without expanding anything.
 function accountLine(
   ctx: Ctx,
   account: Account,
@@ -135,9 +133,6 @@ function accountLine(
   );
 }
 
-// The expansion shown under the selected account on space: plan, each window's
-// reset countdown, and identifying detail — the "everything about this account"
-// view without leaving the list.
 function accountDetail(ctx: Ctx, account: Account, windows: readonly UsageWindow[]) {
   const indent = " ".repeat(5);
   const plan = planLabel(account.plan);
@@ -249,8 +244,6 @@ function providerPanel(
   );
 }
 
-// Explains the attention asterisk, shown only when an account is flagged.
-// Returns null when nothing is flagged so the caller can omit the row entirely.
 function legend(ctx: Ctx, snapshot: DashboardSnapshot): ReturnType<typeof Box> | null {
   const flagged = snapshot.accounts
     .map((account) => healthBadge(ctx.theme, account))
@@ -270,8 +263,6 @@ function legend(ctx: Ctx, snapshot: DashboardSnapshot): ReturnType<typeof Box> |
   );
 }
 
-// A single labelled pill: filled with the accent when active, muted otherwise.
-// Shared by the tab bar and the analytics scope/range toggles.
 function pill(ctx: Ctx, label: string, active: boolean) {
   return Text({
     content: ` ${label} `,
@@ -289,7 +280,6 @@ function tabBar(ctx: Ctx, tab: Tab) {
   );
 }
 
-// The timeframe selector: a row of pills with the active range lit.
 function timeframeBar(ctx: Ctx, timeframe: Timeframe) {
   const cells = TIMEFRAMES.flatMap((option, index) => [
     ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
@@ -302,9 +292,6 @@ function timeframeBar(ctx: Ctx, timeframe: Timeframe) {
   );
 }
 
-// The combined token-throughput dashboard: one chart of tokens over time across
-// all accounts and both providers, framed by a peak/0 axis, with headline totals,
-// an ≈ API-value figure, and a per-provider split.
 function throughputCard(
   ctx: Ctx,
   tokens: TokenTimeframe | undefined,
@@ -454,9 +441,6 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
     state.tab === "accounts"
       ? "↑↓ select · space details · ⏎ switch · a auto · tab analytics · r refresh"
       : "←→ range · tab accounts · r refresh";
-  // Assemble children explicitly, skipping empty nodes: an empty Text still
-  // consumes a gap row, and at 24 lines those phantom rows push a panel border
-  // onto its last account.
   const header = Box(
     { flexDirection: "row" },
     Text({ content: "tokmax", fg: rgb(ctx.theme.accent), attributes: 1 }),
@@ -466,7 +450,6 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
   );
   const children: Array<ReturnType<typeof Box> | ReturnType<typeof Text>> = [header];
   if (!state.installed) {
-    // Nothing routes through tokmax until installed — say so, loudly but once.
     children.push(
       Box(
         { width: "100%", backgroundColor: rgb(ctx.theme.warn) },
@@ -503,8 +486,6 @@ export async function runTuiDashboard(
   socketPath: string,
   options: { installed: boolean; fixture?: AnalyticsSnapshot; now?: number },
 ): Promise<void> {
-  // Fixture mode renders a synthetic snapshot with a pinned clock and theme so
-  // documentation screenshots are byte-for-byte reproducible and need no daemon.
   const live = options.fixture === undefined;
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
   await renderer.waitForThemeMode(400).catch(() => null);
@@ -527,10 +508,6 @@ export async function runTuiDashboard(
     state.selected = rows.length === 0 ? 0 : Math.max(0, Math.min(state.selected, rows.length - 1));
   };
 
-  // Build the next frame fully before swapping it in, so a render error can
-  // never leave the cleared root blank. Old subtrees are destroyed, not just
-  // removed: OpenTUI's remove() only detaches, so without destroy the native
-  // renderables leak every frame until the screen goes blank.
   const paint = () => {
     clampSelection();
     let next: ReturnType<typeof Box>;
@@ -588,8 +565,6 @@ export async function runTuiDashboard(
       await requestSwitch(socketPath, row.provider, row.accountId);
       analytics = await readAnalytics(socketPath);
       rows = orderedRows(analytics.snapshot);
-      // The switched account jumps to the top of its group; keep the cursor on
-      // it rather than on whatever now occupies the old row index.
       const moved = rows.findIndex((r) => r.accountId === row.accountId);
       if (moved >= 0) {
         state.selected = moved;
@@ -633,12 +608,9 @@ export async function runTuiDashboard(
       }
       try {
         renderer.destroy();
-      } catch {
-        // Best-effort teardown; process exit restores the terminal too.
-      }
+      } catch {}
       resolve();
     };
-    // Tab switches tabs; arrows move within the focused tab; enter activates.
     const changeTimeframe = (delta: number) => {
       state.timeframeIndex = Math.max(
         0,
@@ -647,7 +619,6 @@ export async function runTuiDashboard(
       paint();
     };
     renderer.keyInput.on("keypress", (key: { name: string; ctrl: boolean }) => {
-      // A keystroke must never be able to break the dashboard.
       try {
         if (key.name === "q" || (key.ctrl && key.name === "c")) {
           finish();
@@ -676,9 +647,7 @@ export async function runTuiDashboard(
         } else if (key.name === "a" && live) {
           toggleAuto();
         }
-      } catch {
-        // Swallow; the next paint restores a good frame.
-      }
+      } catch {}
     });
     paint();
     renderer.start();
