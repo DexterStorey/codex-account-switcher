@@ -1,8 +1,17 @@
 name: Release
 
+# Authored releases: publish a GitHub Release (write the notes, hit publish) and
+# CI does the rest. No NPM_TOKEN — npm Trusted Publishing mints a short-lived
+# OIDC token per run, and provenance is attached automatically on this public repo.
+# One-time setup before the first automated release:
+#   1. `npm publish` once (locally, signed in) to create the package on npm.
+#   2. On npmjs.com → package Settings → Trusted Publisher → GitHub Actions:
+#      org RubricLab, repo tokenmaxx, workflow release.yml.
+
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,9 +29,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; node 22 ships an older one.
+      - run: npm install -g npm@latest
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run build
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish
