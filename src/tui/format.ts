@@ -91,20 +91,8 @@ export function percentLabel(usedPercent: number | null): string {
   return usedPercent === null ? "  ?%" : `${Math.round(clamp(usedPercent))}%`.padStart(4);
 }
 
-export interface Timeframe {
-  key: string;
-  label: string;
-  ms: number;
-}
-
-// The analytics x-axis spans; the chart re-buckets the same history per choice.
-export const TIMEFRAMES: readonly Timeframe[] = [
-  { key: "1h", label: "1h", ms: 3_600_000 },
-  { key: "5h", label: "5h", ms: 5 * 3_600_000 },
-  { key: "24h", label: "24h", ms: 24 * 3_600_000 },
-  { key: "7d", label: "7d", ms: 7 * 24 * 3_600_000 },
-  { key: "31d", label: "31d", ms: 31 * 24 * 3_600_000 },
-];
+export type { Timeframe } from "../domain.ts";
+export { TIMEFRAMES } from "../domain.ts";
 
 // Resample a time series onto `columns` evenly-spaced buckets over the window
 // [nowMillis - spanMillis, nowMillis]. Empty buckets carry the last known

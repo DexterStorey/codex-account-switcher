@@ -27,9 +27,136 @@ export interface ProxyCredentialSource {
   refresh(provider: ProviderId): Promise<void>;
 }
 
+export interface ProxyUsageEvent {
+  at: number;
+  provider: ProviderId;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface ProxyOptions {
   source: ProxyCredentialSource;
   fetchImplementation?: FetchImplementation;
+  // Metering hook: invoked once per response with the tokens it reported. Never
+  // affects the forwarded stream.
+  record?: (event: ProxyUsageEvent) => void;
+}
+
+interface SseEvent {
+  type?: string;
+  model?: string;
+  message?: { model?: string; usage?: Record<string, number> };
+  usage?: Record<string, number>;
+  response?: { model?: string; usage?: Record<string, number> };
+}
+
+// Reads a response's token usage as it streams past — without buffering the
+// stream. Anthropic reports input in `message_start` and output in
+// `message_delta`; the OpenAI Responses API reports a consolidated `usage` on
+// the terminal event (or on a non-streamed JSON body).
+function createUsageObserver(
+  provider: ProviderId,
+  contentType: string,
+  onUsage: (usage: { model: string | null; inputTokens: number; outputTokens: number }) => void,
+) {
+  const decoder = new TextDecoder();
+  const isSse = contentType.includes("text/event-stream");
+  let lineBuffer = "";
+  let jsonBuffer = "";
+  let model: string | null = null;
+  let input = 0;
+  let output = 0;
+  let saw = false;
+  const maxJson = 4_000_000;
+
+  const consume = (text: string): void => {
+    let event: SseEvent;
+    try {
+      event = JSON.parse(text) as SseEvent;
+    } catch {
+      return;
+    }
+    if (provider === "anthropic") {
+      if (event.type === "message_start" && event.message) {
+        model = event.message.model ?? model;
+        const usage = event.message.usage ?? {};
+        input +=
+          (usage.input_tokens ?? 0) +
+          (usage.cache_read_input_tokens ?? 0) +
+          (usage.cache_creation_input_tokens ?? 0);
+        saw = true;
+      } else if (event.type === "message_delta" && event.usage) {
+        output = event.usage.output_tokens ?? output;
+        saw = true;
+      }
+      return;
+    }
+    const usage = event.response?.usage ?? event.usage;
+    if (usage) {
+      input = usage.input_tokens ?? usage.prompt_tokens ?? input;
+      output = usage.output_tokens ?? usage.completion_tokens ?? output;
+      model = event.response?.model ?? event.model ?? model;
+      saw = true;
+    }
+  };
+
+  return {
+    push(chunk: Uint8Array): void {
+      const text = decoder.decode(chunk, { stream: true });
+      if (isSse) {
+        lineBuffer += text;
+        let newline = lineBuffer.indexOf("\n");
+        while (newline >= 0) {
+          const line = lineBuffer.slice(0, newline).trim();
+          lineBuffer = lineBuffer.slice(newline + 1);
+          if (line.startsWith("data:")) {
+            const payload = line.slice(5).trim();
+            if (payload.length > 0 && payload !== "[DONE]") {
+              consume(payload);
+            }
+          }
+          newline = lineBuffer.indexOf("\n");
+        }
+      } else if (jsonBuffer.length < maxJson) {
+        jsonBuffer += text;
+      }
+    },
+    finish(): void {
+      if (!isSse && jsonBuffer.length > 0) {
+        consume(jsonBuffer);
+      }
+      if (saw && input + output > 0) {
+        onUsage({
+          model: model && model.length > 0 ? model : null,
+          inputTokens: input,
+          outputTokens: output,
+        });
+      }
+    },
+  };
+}
+
+function observeStream(
+  body: ReadableStream<Uint8Array>,
+  observer: ReturnType<typeof createUsageObserver>,
+): ReadableStream<Uint8Array> {
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        // Forward the exact chunk first (byte-identical, no delay), then observe.
+        controller.enqueue(chunk);
+        try {
+          observer.push(chunk);
+        } catch {}
+      },
+      flush() {
+        try {
+          observer.finish();
+        } catch {}
+      },
+    }),
+  );
 }
 
 // Connection-level headers must not be forwarded; the runtime sets its own.
@@ -151,7 +278,27 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
           // Fall through with the original 401; the client can surface it.
         }
       }
-      return passThrough(response);
+      const forwarded = passThrough(response);
+      if (options.record !== undefined && response.ok && forwarded.body !== null) {
+        const observer = createUsageObserver(
+          route.provider,
+          response.headers.get("content-type") ?? "",
+          (usage) =>
+            options.record?.({
+              at: Date.now(),
+              provider: route.provider,
+              model: usage.model,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+            }),
+        );
+        return new Response(observeStream(forwarded.body, observer), {
+          status: forwarded.status,
+          statusText: forwarded.statusText,
+          headers: forwarded.headers,
+        });
+      }
+      return forwarded;
     },
   };
 }

@@ -171,12 +171,69 @@ export const UsageHistorySchema = z
   .strict();
 export type UsageHistory = z.infer<typeof UsageHistorySchema>;
 
+// Analytics timeframes, shared by the store, manager, and TUI.
+export interface Timeframe {
+  key: string;
+  label: string;
+  ms: number;
+}
+export const TIMEFRAMES: readonly Timeframe[] = [
+  { key: "1h", label: "1h", ms: 3_600_000 },
+  { key: "5h", label: "5h", ms: 5 * 3_600_000 },
+  { key: "24h", label: "24h", ms: 24 * 3_600_000 },
+  { key: "7d", label: "7d", ms: 7 * 24 * 3_600_000 },
+  { key: "31d", label: "31d", ms: 31 * 24 * 3_600_000 },
+];
+
+// One request's measured token usage, recorded by the proxy as it streams by.
+export const TokenEventSchema = z
+  .object({
+    at: z.number().int().nonnegative(),
+    provider: ProviderIdSchema,
+    accountId: z.uuid().nullable(),
+    model: z.string().min(1).nullable(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+  })
+  .strict();
+export type TokenEvent = z.infer<typeof TokenEventSchema>;
+
+const TokenProviderTotalSchema = z
+  .object({ tokens: z.number().nonnegative(), costUsd: z.number().nonnegative() })
+  .strict();
+
+// Combined token throughput for one timeframe: `buckets` are token totals per
+// evenly-spaced time bucket (all accounts, both providers), plus headline totals.
+export const TokenTimeframeSchema = z
+  .object({
+    key: z.string(),
+    buckets: z.array(z.number().nonnegative()),
+    bucketMs: z.number().positive(),
+    totalTokens: z.number().nonnegative(),
+    totalInput: z.number().nonnegative(),
+    totalOutput: z.number().nonnegative(),
+    costUsd: z.number().nonnegative(),
+    peakPerHour: z.number().nonnegative(),
+    topModel: z.string().nullable(),
+    byProvider: z
+      .object({ openai: TokenProviderTotalSchema, anthropic: TokenProviderTotalSchema })
+      .strict(),
+  })
+  .strict();
+export type TokenTimeframe = z.infer<typeof TokenTimeframeSchema>;
+
+export const TokenAnalyticsSchema = z
+  .object({ timeframes: z.array(TokenTimeframeSchema) })
+  .strict();
+export type TokenAnalytics = z.infer<typeof TokenAnalyticsSchema>;
+
 export const AnalyticsSnapshotSchema = z
   .object({
     snapshot: DashboardSnapshotSchema,
     history: z.array(
       z.object({ accountId: z.uuid(), windows: z.array(UsageHistorySchema) }).strict(),
     ),
+    tokens: TokenAnalyticsSchema.nullish(),
   })
   .strict();
 export type AnalyticsSnapshot = z.infer<typeof AnalyticsSnapshotSchema>;

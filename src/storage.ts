@@ -13,6 +13,8 @@ import {
   ProviderStateSchema,
   type SwitchRecord,
   SwitchRecordSchema,
+  type TokenEvent,
+  TokenEventSchema,
   type UsageHistory,
   UsageHistoryPointSchema,
   type UsageSnapshot,
@@ -26,6 +28,17 @@ type PersistedSchema<Type> = { parse(value: unknown): Type };
 // probe cadence (60s) this is ~48h; idle accounts (5m) stretch further. Longer
 // timeframes fill in over time and carry the last reading forward across gaps.
 const maxHistoryPoints = 2880;
+const maxTokenEventAgeMs = 31 * 24 * 60 * 60 * 1000;
+const tokenBucketCount = 120;
+
+// Raw per-timeframe token aggregate from the store; the manager prices it into
+// the domain TokenTimeframe (adding cost, peak, breakdown).
+export interface TokenTimeframeAggregate {
+  key: string;
+  bucketMs: number;
+  buckets: number[];
+  byModel: { model: string; provider: string; input: number; output: number }[];
+}
 
 export interface StateStore {
   close(): void;
@@ -45,6 +58,11 @@ export interface StateStore {
   commitSwitch(record: SwitchRecord, state: ProviderState): void;
   usageHistory(accountId: string): UsageHistory[];
   dashboard(): DashboardSnapshot;
+  recordTokenEvent(event: TokenEvent): void;
+  tokenAnalytics(
+    nowMillis: number,
+    timeframes: readonly { key: string; ms: number }[],
+  ): TokenTimeframeAggregate[];
 }
 
 interface JsonRow {
@@ -145,6 +163,16 @@ function migrate(database: Database): void {
       points TEXT NOT NULL,
       PRIMARY KEY (account_id, window_id)
     );
+
+    CREATE TABLE IF NOT EXISTS token_events (
+      at INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      account_id TEXT,
+      model TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS token_events_at ON token_events(at);
 
     DROP TABLE IF EXISTS runtime_sessions;
   `);
@@ -489,8 +517,61 @@ export function createStateStore(databasePath: string): StateStore {
     )();
   }
 
+  function recordTokenEvent(event: TokenEvent): void {
+    const parsed = TokenEventSchema.parse(event);
+    database
+      .query(
+        "INSERT INTO token_events (at, provider, account_id, model, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        parsed.at,
+        parsed.provider,
+        parsed.accountId,
+        parsed.model,
+        parsed.inputTokens,
+        parsed.outputTokens,
+      );
+    database.query("DELETE FROM token_events WHERE at < ?").run(parsed.at - maxTokenEventAgeMs);
+  }
+
+  function tokenAnalytics(
+    nowMillis: number,
+    timeframes: readonly { key: string; ms: number }[],
+  ): TokenTimeframeAggregate[] {
+    const bucketQuery = database.query<
+      { b: number; tokens: number },
+      [number, number, number, number]
+    >(
+      "SELECT CAST((at - ?) / ? AS INTEGER) AS b, SUM(input_tokens + output_tokens) AS tokens FROM token_events WHERE at >= ? AND at <= ? GROUP BY b",
+    );
+    const modelQuery = database.query<
+      { model: string | null; provider: string; input: number; output: number },
+      [number, number]
+    >(
+      "SELECT model, provider, SUM(input_tokens) AS input, SUM(output_tokens) AS output FROM token_events WHERE at >= ? AND at <= ? GROUP BY model, provider",
+    );
+    return timeframes.map(({ key, ms }) => {
+      const start = nowMillis - ms;
+      const bucketMs = Math.max(1, Math.round(ms / tokenBucketCount));
+      const buckets = new Array<number>(tokenBucketCount).fill(0);
+      for (const row of bucketQuery.all(start, bucketMs, start, nowMillis)) {
+        const index = Math.min(tokenBucketCount - 1, Math.max(0, row.b));
+        buckets[index] = (buckets[index] ?? 0) + row.tokens;
+      }
+      const byModel = modelQuery.all(start, nowMillis).map((row) => ({
+        model: row.model ?? "unknown",
+        provider: row.provider,
+        input: row.input,
+        output: row.output,
+      }));
+      return { key, bucketMs, buckets, byModel };
+    });
+  }
+
   return {
     close: () => database.close(),
+    recordTokenEvent,
+    tokenAnalytics,
     listAccounts,
     findAccount,
     saveAccount,

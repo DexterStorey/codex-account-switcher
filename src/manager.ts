@@ -4,10 +4,13 @@ import {
   type ProviderId,
   type ProviderState,
   SwitchRecordSchema,
+  TIMEFRAMES,
+  type TokenTimeframe,
 } from "./domain.ts";
 import { ApplicationError, errorMessage } from "./errors.ts";
 import type { FetchImplementation } from "./http.ts";
 import type { ApplicationPaths } from "./paths.ts";
+import { costUsd } from "./pricing.ts";
 import { removeClaudeProfile } from "./providers/claude/auth.ts";
 import { AnthropicProviderAdapter } from "./providers/claude/provider.ts";
 import type { CredentialVault } from "./providers/codex/auth.ts";
@@ -16,7 +19,44 @@ import type { ProviderAdapter } from "./providers/provider.ts";
 import { type RunningProxy, startProxy } from "./proxy.ts";
 import { createRuntimeCredentialSource } from "./runtime-source.ts";
 import { selectRotation } from "./selection.ts";
-import type { StateStore } from "./storage.ts";
+import type { StateStore, TokenTimeframeAggregate } from "./storage.ts";
+
+function priceTokenTimeframe(aggregate: TokenTimeframeAggregate): TokenTimeframe {
+  let totalInput = 0;
+  let totalOutput = 0;
+  let costTotal = 0;
+  const byProvider = {
+    openai: { tokens: 0, costUsd: 0 },
+    anthropic: { tokens: 0, costUsd: 0 },
+  };
+  let top: { model: string; tokens: number } | null = null;
+  for (const entry of aggregate.byModel) {
+    const entryCost = costUsd(entry.model, entry.input, entry.output);
+    const entryTokens = entry.input + entry.output;
+    totalInput += entry.input;
+    totalOutput += entry.output;
+    costTotal += entryCost;
+    const bucket = entry.provider === "anthropic" ? byProvider.anthropic : byProvider.openai;
+    bucket.tokens += entryTokens;
+    bucket.costUsd += entryCost;
+    if (top === null || entryTokens > top.tokens) {
+      top = { model: entry.model, tokens: entryTokens };
+    }
+  }
+  const peakBucket = aggregate.buckets.reduce((max, value) => Math.max(max, value), 0);
+  return {
+    key: aggregate.key,
+    buckets: aggregate.buckets,
+    bucketMs: aggregate.bucketMs,
+    totalTokens: totalInput + totalOutput,
+    totalInput,
+    totalOutput,
+    costUsd: costTotal,
+    peakPerHour: peakBucket * (3_600_000 / aggregate.bucketMs),
+    topModel: top?.model ?? null,
+    byProvider,
+  };
+}
 
 export interface ManagerDependencies {
   fetchImplementation: FetchImplementation;
@@ -108,7 +148,20 @@ export class AccountManager {
       vault: this.#vault,
       fetchImplementation: this.#dependencies.fetchImplementation,
     });
-    this.#proxy = startProxy({ source, port: this.#paths.proxyPort });
+    this.#proxy = startProxy({
+      source,
+      port: this.#paths.proxyPort,
+      // Metering: attribute the observed tokens to whichever account is active
+      // for that provider. Wrapped so a store error can never affect proxying.
+      record: (event) => {
+        try {
+          this.#store.recordTokenEvent({
+            ...event,
+            accountId: this.activeAccount(event.provider)?.id ?? null,
+          });
+        } catch {}
+      },
+    });
     void this.refreshAll().catch(() => undefined);
     this.#monitor = setInterval(() => {
       void this.refreshAll().catch(() => undefined);
@@ -140,12 +193,16 @@ export class AccountManager {
 
   public analytics() {
     const snapshot = this.#store.dashboard();
+    const nowMillis = this.#dependencies.now().getTime();
     return {
       snapshot,
       history: snapshot.accounts.map((account) => ({
         accountId: account.id,
         windows: this.#store.usageHistory(account.id),
       })),
+      tokens: {
+        timeframes: this.#store.tokenAnalytics(nowMillis, TIMEFRAMES).map(priceTokenTimeframe),
+      },
     };
   }
 
