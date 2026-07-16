@@ -166,12 +166,14 @@ export function brailleLine(
   columns: readonly (number | null)[],
   width: number,
   height: number,
+  max = 100,
 ): string[] {
   const dotRows = height * 4;
   const dotCols = width * 2;
+  const scale = max <= 0 ? 1 : max;
   const grid: boolean[][] = Array.from({ length: dotCols }, () => new Array(dotRows).fill(false));
   const toY = (value: number): number =>
-    Math.max(0, Math.min(dotRows - 1, Math.round((clamp(value) / 100) * (dotRows - 1))));
+    Math.max(0, Math.min(dotRows - 1, Math.round((value / scale) * (dotRows - 1))));
   let previousY = -1;
   for (let x = 0; x < dotCols; x += 1) {
     const value = columns[x];
@@ -324,4 +326,47 @@ export function shortWindow(label: string): string {
 
 export function clamp(value: number): number {
   return Math.max(0, Math.min(100, value));
+}
+
+// Resample fixed-count throughput buckets onto `columns` chart cells, taking the
+// max of each source range so a spike survives downsampling and no cell reads a
+// false zero when upsampling. Unlike bucketSeries, gaps stay 0 (nothing = flat).
+export function throughputColumns(buckets: readonly number[], columns: number): number[] {
+  const count = buckets.length;
+  const result = new Array<number>(Math.max(0, columns)).fill(0);
+  if (count === 0 || columns <= 0) {
+    return result;
+  }
+  for (let column = 0; column < columns; column += 1) {
+    const lo = Math.floor((column / columns) * count);
+    const hi = Math.max(lo + 1, Math.floor(((column + 1) / columns) * count));
+    let peak = 0;
+    for (let index = lo; index < hi && index < count; index += 1) {
+      peak = Math.max(peak, buckets[index] ?? 0);
+    }
+    result[column] = peak;
+  }
+  return result;
+}
+
+// 1234 → "1.2k", 1_500_000 → "1.5M".
+export function compactNumber(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(1)}B`;
+  }
+  if (abs >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (abs >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}k`;
+  }
+  return `${Math.round(value)}`;
+}
+
+export function compactUsd(value: number): string {
+  if (value >= 1000) {
+    return `$${(value / 1000).toFixed(1)}k`;
+  }
+  return `$${value.toFixed(2)}`;
 }

@@ -5,15 +5,16 @@ import type {
   DashboardSnapshot,
   ProviderId,
   ProviderState,
+  TokenTimeframe,
   UsageWindow,
 } from "../domain.ts";
 import { readAnalytics, refreshUsage, requestPolicy, requestSwitch } from "../ipc.ts";
 import {
   brailleLine,
-  bucketSeries,
+  compactNumber,
+  compactUsd,
   detectThemeName,
   healthBadge,
-  mergedPressureSeries,
   meter,
   percentLabel,
   planLabel,
@@ -26,10 +27,10 @@ import {
   TIMEFRAMES,
   type Timeframe,
   themes,
+  throughputColumns,
 } from "./format.ts";
 
 type Tab = "accounts" | "analytics";
-type Scope = ProviderId | "both";
 
 const colorCache = new Map<string, RGBA>();
 function rgb(hex: string): RGBA {
@@ -50,8 +51,6 @@ const providerTitles: Record<ProviderId, string> = {
 const providerShort: Record<ProviderId, string> = { openai: "Codex", anthropic: "Claude Code" };
 const providerCli: Record<ProviderId, string> = { openai: "codex", anthropic: "claude" };
 const providerOrder: readonly ProviderId[] = ["openai", "anthropic"];
-const scopeOrder: readonly Scope[] = ["openai", "anthropic", "both"];
-const scopeLabel: Record<Scope, string> = { openai: "codex", anthropic: "claude", both: "both" };
 const fallbackTimeframe = TIMEFRAMES[2] as Timeframe;
 
 interface Row {
@@ -71,11 +70,6 @@ function pad(value: string, width: number): string {
 
 function hardWindows(windows: readonly UsageWindow[]): UsageWindow[] {
   return windows.filter((window) => window.kind === "hard");
-}
-
-function currentPressure(windows: readonly UsageWindow[]): number | null {
-  const hard = hardWindows(windows);
-  return hard.length === 0 ? null : Math.max(...hard.map((window) => window.usedPercent));
 }
 
 function orderedRows(snapshot: DashboardSnapshot): Row[] {
@@ -295,133 +289,109 @@ function tabBar(ctx: Ctx, tab: Tab) {
   );
 }
 
-// The scope + timeframe selectors, each a row of pills with the active one lit.
-function analyticsControls(ctx: Ctx, scope: Scope, timeframe: Timeframe) {
-  const scopeCells = scopeOrder.flatMap((option, index) => [
-    ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
-    pill(ctx, scopeLabel[option], option === scope),
-  ]);
-  const rangeCells = TIMEFRAMES.flatMap((option, index) => [
+// The timeframe selector: a row of pills with the active range lit.
+function timeframeBar(ctx: Ctx, timeframe: Timeframe) {
+  const cells = TIMEFRAMES.flatMap((option, index) => [
     ...(index === 0 ? [] : [Text({ content: " ", fg: rgb(ctx.theme.faint) })]),
     pill(ctx, option.label, option.key === timeframe.key),
   ]);
   return Box(
     { flexDirection: "row", width: "100%", paddingLeft: 1 },
-    ...scopeCells,
-    Box({ flexGrow: 1 }),
-    ...rangeCells,
-    Text({ content: " ", fg: rgb(ctx.theme.bg) }),
+    Text({ content: "range  ", fg: rgb(ctx.theme.dim) }),
+    ...cells,
   );
 }
 
-// One provider's usage trace over the chosen timeframe: a braille line chart of
-// the account's worst-window pressure, framed by a 0/100 axis and live metrics.
-function chartCard(
+// The combined token-throughput dashboard: one chart of tokens over time across
+// all accounts and both providers, framed by a peak/0 axis, with headline totals,
+// an ≈ API-value figure, and a per-provider split.
+function throughputCard(
   ctx: Ctx,
-  analytics: AnalyticsSnapshot,
-  provider: ProviderId,
+  tokens: TokenTimeframe | undefined,
   timeframe: Timeframe,
   height: number,
   width: number,
-  showTimeAxis: boolean,
 ) {
-  const state = analytics.snapshot.providers.find((s) => s.provider === provider);
-  const active =
-    state?.activeAccountId == null
-      ? undefined
-      : analytics.snapshot.accounts.find((a) => a.id === state.activeAccountId);
-  const usage =
-    active === undefined
-      ? undefined
-      : analytics.snapshot.usage.find((u) => u.accountId === active.id);
-  const hard = hardWindows(usage?.windows ?? []);
-  const hardIds = new Set(hard.map((window) => window.id));
-  const history = analytics.history.find((h) => h.accountId === active?.id);
-  const series = mergedPressureSeries(
-    (history?.windows ?? []).filter((window) => hardIds.has(window.windowId)),
-  );
-  const plan = active === undefined ? null : planLabel(active.plan);
-  const title =
-    active === undefined
-      ? ` ${providerShort[provider]} · no active account `
-      : ` ${providerShort[provider]} · ${active.label}${plan === null ? "" : ` · ${plan}`} `;
-
   const body: ReturnType<typeof Box>[] = [];
-  if (active === undefined) {
+  if (tokens === undefined || tokens.totalTokens === 0) {
+    for (let index = 0; index < Math.max(1, height - 1); index += 1) {
+      body.push(Box({ flexDirection: "row" }, Text({ content: " ", fg: rgb(ctx.theme.bg) })));
+    }
     body.push(
       Box(
         { flexDirection: "row" },
-        Text({
-          content: `  tokmax login ${providerCli[provider]} to begin`,
-          fg: rgb(ctx.theme.dim),
-        }),
+        Text({ content: "  no token usage yet — run ", fg: rgb(ctx.theme.dim) }),
+        Text({ content: "codex", fg: rgb(ctx.theme.fg) }),
+        Text({ content: " or ", fg: rgb(ctx.theme.dim) }),
+        Text({ content: "claude", fg: rgb(ctx.theme.fg) }),
+        Text({ content: " and it fills in", fg: rgb(ctx.theme.dim) }),
       ),
     );
   } else {
-    const columns = bucketSeries(series, timeframe.ms, ctx.now, width * 2);
-    const drawn = columns.filter((value): value is number => value !== null);
-    const nowPercent = currentPressure(usage?.windows ?? []);
-    const color = pressureColor(ctx.theme, nowPercent);
-    const chart =
-      drawn.length === 0
-        ? new Array(height).fill(" ".repeat(width))
-        : brailleLine(columns, width, height);
+    const columns = throughputColumns(tokens.buckets, width * 2);
+    const peak = Math.max(...columns, 1);
+    const chart = brailleLine(columns, width, height, peak);
+    const axisTop = `${compactNumber(tokens.peakPerHour)}/h`.padStart(6);
     chart.forEach((line, index) => {
-      const axis = index === 0 ? "100" : index === chart.length - 1 ? "  0" : "   ";
+      const axis = index === 0 ? axisTop : index === chart.length - 1 ? "     0" : "      ";
       body.push(
         Box(
           { flexDirection: "row" },
           Text({ content: `${axis} `, fg: rgb(ctx.theme.faint) }),
-          Text({ content: line, fg: rgb(color) }),
+          Text({ content: line, fg: rgb(ctx.theme.accent) }),
         ),
       );
     });
-    if (showTimeAxis) {
-      const timeAxis = `${timeframe.label} ago`.padEnd(Math.max(0, width - 3));
-      body.push(
-        Box(
-          { flexDirection: "row" },
-          Text({ content: "    ", fg: rgb(ctx.theme.bg) }),
-          Text({ content: timeAxis, fg: rgb(ctx.theme.faint) }),
-          Text({ content: "now", fg: rgb(ctx.theme.faint) }),
-        ),
-      );
-    }
-    if (drawn.length === 0) {
-      body.push(
-        Box(
-          { flexDirection: "row" },
-          Text({ content: "    collecting usage…", fg: rgb(ctx.theme.dim) }),
-        ),
-      );
-    } else {
-      const peak = Math.round(Math.max(...drawn));
-      const average = Math.round(drawn.reduce((sum, value) => sum + value, 0) / drawn.length);
-      // Show the two windows that reset soonest — the ones worth knowing about —
-      // so a third window can never push the line past the panel edge.
-      const resets = hard
-        .map((window) => ({
-          label: shortWindow(window.label),
-          reset: resetCountdown(window.resetAt, ctx.now),
-          at: window.resetAt === null ? Number.POSITIVE_INFINITY : Date.parse(window.resetAt),
-        }))
-        .filter((entry) => entry.reset !== null)
-        .sort((left, right) => left.at - right.at)
-        .slice(0, 2)
-        .map((entry) => `${entry.label} ${entry.reset}`);
-      const prefix = "    now ";
-      const nowText = nowPercent === null ? "—" : `${Math.round(nowPercent)}%`;
-      const tail = `   peak ${peak}%   avg ${average}%${resets.length === 0 ? "" : `   resets ${resets.join(" · ")}`}`;
-      const budget = Math.max(0, width - prefix.length - nowText.length);
-      body.push(
-        Box(
-          { flexDirection: "row" },
-          Text({ content: prefix, fg: rgb(ctx.theme.dim) }),
-          Text({ content: nowText, fg: rgb(color), attributes: 1 }),
-          Text({ content: tail.slice(0, budget), fg: rgb(ctx.theme.faint) }),
-        ),
-      );
-    }
+    body.push(
+      Box(
+        { flexDirection: "row" },
+        Text({ content: "       ", fg: rgb(ctx.theme.bg) }),
+        Text({
+          content: `${timeframe.label} ago`.padEnd(Math.max(0, width - 3)),
+          fg: rgb(ctx.theme.faint),
+        }),
+        Text({ content: "now", fg: rgb(ctx.theme.faint) }),
+      ),
+    );
+    body.push(
+      Box(
+        { flexDirection: "row", paddingLeft: 1 },
+        Text({ content: "Σ ", fg: rgb(ctx.theme.dim) }),
+        Text({
+          content: `${compactNumber(tokens.totalTokens)} tokens`,
+          fg: rgb(ctx.theme.fg),
+          attributes: 1,
+        }),
+        Text({ content: "   ≈ ", fg: rgb(ctx.theme.dim) }),
+        Text({ content: compactUsd(tokens.costUsd), fg: rgb(ctx.theme.good), attributes: 1 }),
+        Text({ content: "   peak ", fg: rgb(ctx.theme.dim) }),
+        Text({ content: `${compactNumber(tokens.peakPerHour)}/h`, fg: rgb(ctx.theme.accent) }),
+        Text({
+          content: tokens.topModel === null ? "" : `   top ${tokens.topModel}`,
+          fg: rgb(ctx.theme.faint),
+        }),
+      ),
+    );
+    body.push(
+      Box(
+        { flexDirection: "row", paddingLeft: 1 },
+        Text({ content: "codex ", fg: rgb(ctx.theme.dim) }),
+        Text({ content: compactNumber(tokens.byProvider.openai.tokens), fg: rgb(ctx.theme.fg) }),
+        Text({
+          content: ` · ${compactUsd(tokens.byProvider.openai.costUsd)}`,
+          fg: rgb(ctx.theme.faint),
+        }),
+        Text({ content: "      claude ", fg: rgb(ctx.theme.dim) }),
+        Text({
+          content: compactNumber(tokens.byProvider.anthropic.tokens),
+          fg: rgb(ctx.theme.fg),
+        }),
+        Text({
+          content: ` · ${compactUsd(tokens.byProvider.anthropic.costUsd)}`,
+          fg: rgb(ctx.theme.faint),
+        }),
+      ),
+    );
   }
   return Box(
     {
@@ -431,30 +401,20 @@ function chartCard(
       border: true,
       borderStyle: "rounded",
       borderColor: rgb(ctx.theme.border),
-      title,
+      title: " Token throughput · all accounts · both providers ",
       titleColor: rgb(ctx.theme.dim),
     },
     ...body,
   );
 }
 
-function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot, scope: Scope, timeframe: Timeframe) {
+function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot, timeframe: Timeframe) {
   const cols = process.stdout.columns ?? 80;
   const rows = process.stdout.rows ?? 24;
-  const width = Math.max(24, Math.min(160, cols - 8));
-  const controls = analyticsControls(ctx, scope, timeframe);
-  if (scope === "both") {
-    // Two stacked cards must share the height, so they run compact: shorter
-    // traces and no per-card time axis (the range toggle already names it).
-    const height = Math.max(3, Math.min(6, Math.floor((rows - 18) / 2)));
-    return [
-      controls,
-      chartCard(ctx, analytics, "openai", timeframe, height, width, false),
-      chartCard(ctx, analytics, "anthropic", timeframe, height, width, false),
-    ];
-  }
-  const height = Math.max(4, Math.min(11, rows - 15));
-  return [controls, chartCard(ctx, analytics, scope, timeframe, height, width, true)];
+  const width = Math.max(24, Math.min(160, cols - 12));
+  const height = Math.max(4, Math.min(12, rows - 13));
+  const tokens = analytics.tokens?.timeframes.find((entry) => entry.key === timeframe.key);
+  return [timeframeBar(ctx, timeframe), throughputCard(ctx, tokens, timeframe, height, width)];
 }
 
 function accountsBody(
@@ -477,7 +437,6 @@ interface ViewState {
   tab: Tab;
   selected: number;
   expanded: boolean;
-  scope: Scope;
   timeframeIndex: number;
   installed: boolean;
   note: string;
@@ -493,8 +452,8 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
   const timeframe = TIMEFRAMES[state.timeframeIndex] ?? fallbackTimeframe;
   const footer =
     state.tab === "accounts"
-      ? "↑↓ select · space details · ⏎ switch · a auto-rotate · ←→ tabs · r refresh"
-      : "↑↓ scope · 1-5 range · ←→ tabs · r refresh";
+      ? "↑↓ select · space details · ⏎ switch · a auto · tab analytics · r refresh"
+      : "←→ range · tab accounts · r refresh";
   // Assemble children explicitly, skipping empty nodes: an empty Text still
   // consumes a gap row, and at 24 lines those phantom rows push a panel border
   // onto its last account.
@@ -524,7 +483,7 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
   children.push(
     ...(state.tab === "accounts"
       ? accountsBody(ctx, analytics.snapshot, rows, state.selected, state.expanded)
-      : analyticsBody(ctx, analytics, state.scope, timeframe)),
+      : analyticsBody(ctx, analytics, timeframe)),
   );
   children.push(Text({ content: footer, fg: rgb(ctx.theme.dim) }));
   return Box(
@@ -558,7 +517,6 @@ export async function runTuiDashboard(
     tab: "accounts",
     selected: 0,
     expanded: false,
-    scope: "both",
     timeframeIndex: 2,
     installed: options.installed,
     note: "",
@@ -660,13 +618,6 @@ export async function runTuiDashboard(
     );
   };
 
-  const cycleScope = (delta: number) => {
-    const index = scopeOrder.indexOf(state.scope);
-    const next = (index + delta + scopeOrder.length) % scopeOrder.length;
-    state.scope = scopeOrder[next] ?? "both";
-    paint();
-  };
-
   await new Promise<void>((resolve) => {
     const interval = live
       ? setInterval(() => void reload(false).catch(() => undefined), 2_000)
@@ -687,40 +638,43 @@ export async function runTuiDashboard(
       }
       resolve();
     };
+    // Tab switches tabs; arrows move within the focused tab; enter activates.
+    const changeTimeframe = (delta: number) => {
+      state.timeframeIndex = Math.max(
+        0,
+        Math.min(TIMEFRAMES.length - 1, state.timeframeIndex + delta),
+      );
+      paint();
+    };
     renderer.keyInput.on("keypress", (key: { name: string; ctrl: boolean }) => {
       // A keystroke must never be able to break the dashboard.
       try {
         if (key.name === "q" || (key.ctrl && key.name === "c")) {
           finish();
-        } else if (key.name === "left" || key.name === "right") {
+        } else if (key.name === "tab") {
           state.tab = state.tab === "accounts" ? "analytics" : "accounts";
-          paint();
-        } else if (key.name === "up" || key.name === "k") {
-          if (state.tab === "analytics") {
-            cycleScope(-1);
-          } else {
-            state.selected = Math.max(0, state.selected - 1);
-            paint();
-          }
-        } else if (key.name === "down" || key.name === "j") {
-          if (state.tab === "analytics") {
-            cycleScope(1);
-          } else {
-            state.selected = Math.max(0, Math.min(rows.length - 1, state.selected + 1));
-            paint();
-          }
-        } else if (key.name === "space" && state.tab === "accounts") {
-          state.expanded = !state.expanded;
-          paint();
-        } else if (key.name === "return" && state.tab === "accounts" && live) {
-          switchToSelected();
-        } else if (key.name === "a" && state.tab === "accounts" && live) {
-          toggleAuto();
-        } else if (/^[1-5]$/.test(key.name) && state.tab === "analytics") {
-          state.timeframeIndex = Number(key.name) - 1;
           paint();
         } else if (key.name === "r" && live) {
           void reload(true);
+        } else if (state.tab === "analytics") {
+          if (key.name === "left" || key.name === "up" || key.name === "k") {
+            changeTimeframe(-1);
+          } else if (key.name === "right" || key.name === "down" || key.name === "j") {
+            changeTimeframe(1);
+          }
+        } else if (key.name === "up" || key.name === "k") {
+          state.selected = Math.max(0, state.selected - 1);
+          paint();
+        } else if (key.name === "down" || key.name === "j") {
+          state.selected = Math.max(0, Math.min(rows.length - 1, state.selected + 1));
+          paint();
+        } else if (key.name === "space") {
+          state.expanded = !state.expanded;
+          paint();
+        } else if (key.name === "return" && live) {
+          switchToSelected();
+        } else if (key.name === "a" && live) {
+          toggleAuto();
         }
       } catch {
         // Swallow; the next paint restores a good frame.

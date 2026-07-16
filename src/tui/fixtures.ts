@@ -5,12 +5,67 @@ import {
   type AutomationPolicy,
   type ProviderId,
   type ProviderState,
+  TIMEFRAMES,
+  type TokenAnalytics,
   type UsageHistory,
   type UsageHistoryPoint,
   type UsageSnapshot,
   type UsageWindow,
 } from "../domain.ts";
+import { costUsd } from "../pricing.ts";
 import { clamp } from "./format.ts";
+
+// Believable combined token throughput for the analytics screenshots. `scale` 0
+// yields an empty dashboard (onboarding). Buckets are deterministic bursts.
+function buildTokens(scale: number): TokenAnalytics {
+  const timeframes = TIMEFRAMES.map((timeframe, seed) => {
+    const hours = timeframe.ms / HOUR;
+    const raw = Array.from({ length: 120 }, (_, i) =>
+      Math.max(
+        0,
+        Math.sin(i * 0.35 + seed) * 0.5 +
+          Math.sin(i * 0.13 + seed * 2) * 0.5 +
+          noise(i + seed * 50) * 0.4 -
+          0.12,
+      ),
+    );
+    const rawSum = raw.reduce((sum, value) => sum + value, 0) || 1;
+    const target = Math.round(150_000 * hours * 0.5 * scale);
+    const buckets = raw.map((value) => Math.round((value / rawSum) * target));
+    const totalTokens = buckets.reduce((sum, value) => sum + value, 0);
+    const totalInput = Math.round(totalTokens * 0.7);
+    const codexTokens = Math.round(totalTokens * 0.55);
+    const claudeTokens = totalTokens - codexTokens;
+    const codexCost = costUsd(
+      "gpt-5.6-sol",
+      Math.round(codexTokens * 0.7),
+      Math.round(codexTokens * 0.3),
+    );
+    const claudeCost = costUsd(
+      "claude-opus-4-8",
+      Math.round(claudeTokens * 0.7),
+      Math.round(claudeTokens * 0.3),
+    );
+    const bucketMs = timeframe.ms / 120;
+    const peakBucket = buckets.reduce((max, value) => Math.max(max, value), 0);
+    return {
+      key: timeframe.key,
+      buckets,
+      bucketMs,
+      totalTokens,
+      totalInput,
+      totalOutput: totalTokens - totalInput,
+      costUsd: codexCost + claudeCost,
+      peakPerHour: Math.round(peakBucket * (3_600_000 / bucketMs)),
+      topModel: totalTokens === 0 ? null : "claude-opus-4-8",
+      byProvider: {
+        openai: { tokens: codexTokens, costUsd: codexCost },
+        anthropic: { tokens: claudeTokens, costUsd: claudeCost },
+      },
+    };
+  });
+  return { timeframes };
+}
 
 // Synthetic dashboards for documentation and visual QA. These build fully valid
 // AnalyticsSnapshots — the exact shape the daemon serves over IPC — so the real
@@ -173,6 +228,7 @@ function assemble(
   now: number,
   accounts: AccountSeed[],
   providers: ProviderSeed[],
+  tokenScale = 1,
 ): AnalyticsSnapshot {
   return AnalyticsSnapshotSchema.parse({
     snapshot: {
@@ -185,6 +241,7 @@ function assemble(
       accountId: uuid(seed.n),
       windows: (seed.windows ?? []).map((spec) => toHistory(spec, now)),
     })),
+    tokens: buildTokens(tokenScale),
   });
 }
 
@@ -365,6 +422,7 @@ const onboarding: ScenarioBuilder = (now) =>
         auto: false,
       },
     ],
+    0,
   );
 
 const scenarios: Record<string, ScenarioBuilder> = { cruising, oneHot, rotated, onboarding };
