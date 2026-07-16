@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Renders the flagship composite (dark + light): the real tokmax dashboard beside
+// Renders the flagship composite (dark + light): the real tokenmaxx dashboard beside
 // mock Claude Code and Codex sessions, arranged in a tmux layout and framed by
 // VHS. The layout is built by flagship/build.sh; the sessions are the static
 // mock-claude.sh / mock-codex.sh (modelled on the real TUIs). Deterministic.
@@ -23,9 +23,9 @@ for (const dir of [outDir, tapeDir, tmpDir]) {
 const vhs = existsSync("/opt/homebrew/bin/vhs") ? "/opt/homebrew/bin/vhs" : "vhs";
 const buildScript = join(assetsDir, "flagship", "build.sh");
 
-// The whole terminal background must match the tokmax theme, otherwise the mock
+// The whole terminal background must match the tokenmaxx theme, otherwise the mock
 // panes (which don't paint their own background) show VHS's default and their
-// theme-coloured text vanishes. Single-pane shots don't need this — tokmax fills
+// theme-coloured text vanishes. Single-pane shots don't need this — tokenmaxx fills
 // the frame — but the flagship's mock panes do.
 const TERM_BG: Record<ThemeName, string> = { dark: "#0b0d10", light: "#fbfcfe" };
 const TERM_FG: Record<ThemeName, string> = { dark: "#e6e6e6", light: "#1c2430" };
@@ -46,7 +46,7 @@ function tape(theme: ThemeName, png: string, gif: string): string {
     "Set WindowBarSize 40",
     "Set BorderRadius 12",
     "Set TypingSpeed 1ms",
-    `Env TOKMAX_NOW "${FIXTURE_NOW}"`,
+    `Env TOKENMAXX_NOW "${FIXTURE_NOW}"`,
     `Type "THEME=${theme} bash ${buildScript}"`,
     "Enter",
     "Sleep 9s",

@@ -134,7 +134,7 @@ function sampleAge(observedAt: string, now: Date): string | null {
 }
 
 function healthNote(account: Account): { note: string; severity: AnsiCode } | null {
-  const relogin = `tokmax ${providerCliName(account.provider)} relogin ${truncate(account.label, 40)}`;
+  const relogin = `tokenmaxx ${providerCliName(account.provider)} relogin ${truncate(account.label, 40)}`;
   switch (account.health) {
     case "ready":
     case "unchecked":
@@ -229,7 +229,9 @@ function providerSection(
     `${paint(pad(providerTitle(provider), 34), "bold")}${paint(details.join(" · "), "dim")}`,
   ];
   if (accounts.length === 0) {
-    lines.push(`  ${paint(`no accounts yet — tokmax ${providerCliName(provider)} login`, "dim")}`);
+    lines.push(
+      `  ${paint(`no accounts yet — tokenmaxx ${providerCliName(provider)} login`, "dim")}`,
+    );
   }
   for (const account of accounts) {
     lines.push(
@@ -252,7 +254,7 @@ export function renderDashboard(
 ): string {
   const paint = createPainter(options.color === true);
   const clock = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const header = `${paint("tokmax", "bold", "cyan")} ${paint(`· ${clock}`, "dim")}`;
+  const header = `${paint("tokenmaxx", "bold", "cyan")} ${paint(`· ${clock}`, "dim")}`;
   return [
     header,
     "",
@@ -260,6 +262,6 @@ export function renderDashboard(
     "",
     providerSection(paint, snapshot, "anthropic", now),
     "",
-    paint("● active — every request uses it · q quit · r refresh · tokmax --help", "dim"),
+    paint("● active — every request uses it · q quit · r refresh · tokenmaxx --help", "dim"),
   ].join("\n");
 }

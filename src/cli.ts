@@ -82,13 +82,13 @@ function help(): string {
     return [`  ${accent(name)}`, ...lines.map((line) => `${gutter}${dim(line)}`)].join("\n");
   };
   return [
-    `${accent("tokmax")} ${dim("— juggle rate limits across your Codex and Claude Code accounts")}`,
+    `${accent("tokenmaxx")} ${dim("— juggle rate limits across your Codex and Claude Code accounts")}`,
     "",
-    `${head("Usage")}  tokmax <command> [options]        ${dim("run with no command for the dashboard")}`,
+    `${head("Usage")}  tokenmaxx <command> [options]        ${dim("run with no command for the dashboard")}`,
     "",
     head("Setup"),
     row("login <codex|claude>", "sign in an account · re-run to re-auth"),
-    row("install", "route codex & claude through tokmax"),
+    row("install", "route codex & claude through tokenmaxx"),
     row("uninstall", "restore your original config"),
     "",
     head("Everyday"),
@@ -109,7 +109,7 @@ function help(): string {
     head("Auto-rotation"),
     dim("  The threshold is measured against the active account's fullest rate-limit"),
     dim("  window — its 5-hour or weekly window, whichever is highest. When that"),
-    dim("  reaches the threshold (default 95%) or the account gets limited, tokmax"),
+    dim("  reaches the threshold (default 95%) or the account gets limited, tokenmaxx"),
     dim("  switches to the healthy account with the most headroom and holds it for"),
     dim("  at least 5 minutes. Turning auto on is what authorizes the switching."),
     "",
@@ -231,7 +231,7 @@ async function stopDaemon(context: ApplicationContext): Promise<void> {
     }
     await Bun.sleep(200);
   }
-  process.stdout.write("Manager daemon is still draining; check tokmax daemon status.\n");
+  process.stdout.write("Manager daemon is still draining; check tokenmaxx daemon status.\n");
 }
 
 async function ensureDaemon(context: ApplicationContext): Promise<void> {
@@ -257,7 +257,7 @@ async function login(
   providerArgument: string | undefined,
 ): Promise<void> {
   if (providerArgument === undefined) {
-    throw new ApplicationError("USAGE", "Usage: tokmax login <codex|claude>");
+    throw new ApplicationError("USAGE", "Usage: tokenmaxx login <codex|claude>");
   }
   const provider = providerFromCli(providerArgument);
   await ensureDaemon(context);
@@ -325,7 +325,7 @@ const healthText: Record<Account["health"], string> = {
   refreshing: "refreshing",
   loginExpiring: "login expiring soon",
   scopeMissing: "missing a scope",
-  reauthenticationRequired: "login required — tokmax login",
+  reauthenticationRequired: "login required — tokenmaxx login",
   temporarilyUnreachable: "provider unreachable",
   usageRateLimited: "rate-limited",
   disabled: "disabled",
@@ -338,7 +338,7 @@ function listAccounts(context: ApplicationContext): void {
   const accounts = context.store.listAccounts();
   if (accounts.length === 0) {
     process.stdout.write(
-      "No accounts yet. Sign in with:  tokmax login codex   ·   tokmax login claude\n",
+      "No accounts yet. Sign in with:  tokenmaxx login codex   ·   tokenmaxx login claude\n",
     );
     return;
   }
@@ -369,7 +369,7 @@ async function switchAccount(
   const providerArgument = arguments_[0];
   const accountReference = arguments_[1];
   if (providerArgument === undefined || accountReference === undefined) {
-    throw new ApplicationError("USAGE", "Usage: tokmax switch <codex|claude> <email-or-id>");
+    throw new ApplicationError("USAGE", "Usage: tokenmaxx switch <codex|claude> <email-or-id>");
   }
   const provider = providerFromCli(providerArgument);
   const target = resolveAccount(context.store, provider, accountReference);
@@ -387,7 +387,7 @@ async function configureAutomation(
   if (providerArgument === undefined || (mode !== "on" && mode !== "off")) {
     throw new ApplicationError(
       "USAGE",
-      "Usage: tokmax auto <codex|claude|both> <on|off> [--threshold 95]",
+      "Usage: tokenmaxx auto <codex|claude|both> <on|off> [--threshold 95]",
     );
   }
   const providers =
@@ -433,9 +433,9 @@ async function installConfig(context: ApplicationContext): Promise<void> {
   await installCodexConfig(context.paths);
   await installClaudeConfig(context.paths);
   process.stdout.write(
-    "Native codex and claude now route through tokmax.\n" +
-      "Just run `codex` or `claude` as usual — tokmax injects the active account.\n" +
-      "Undo any time with: tokmax uninstall\n",
+    "Native codex and claude now route through tokenmaxx.\n" +
+      "Just run `codex` or `claude` as usual — tokenmaxx injects the active account.\n" +
+      "Undo any time with: tokenmaxx uninstall\n",
   );
 }
 
@@ -443,12 +443,12 @@ async function uninstallConfig(): Promise<void> {
   const codex = await uninstallCodexConfig();
   const claude = await uninstallClaudeConfig();
   if (codex === null && claude === null) {
-    process.stdout.write("tokmax was not installed; nothing to restore.\n");
+    process.stdout.write("tokenmaxx was not installed; nothing to restore.\n");
     return;
   }
   process.stdout.write(
     "Restored your original codex and claude config.\n" +
-      "Native clients no longer route through tokmax. Re-enable with: tokmax install\n",
+      "Native clients no longer route through tokenmaxx. Re-enable with: tokenmaxx install\n",
   );
 }
 
@@ -479,7 +479,7 @@ async function doctor(context: ApplicationContext): Promise<void> {
   }
   const installed = await isInstalled();
   process.stdout.write(
-    `${installed ? "ok     " : "note   "}  config   ${installed ? "native codex & claude route through tokmax" : "run tokmax install to route native codex & claude"}\n`,
+    `${installed ? "ok     " : "note   "}  config   ${installed ? "native codex & claude route through tokenmaxx" : "run tokenmaxx install to route native codex & claude"}\n`,
   );
   process.stdout.write(`state     ${context.paths.database}\n`);
   const legacyDirectories = [join(context.paths.root, "codex"), join(context.paths.root, "claude")];
@@ -505,15 +505,15 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
     switch (command) {
       case undefined:
       case "dashboard": {
-        const fixtureName = process.env.TOKMAX_FIXTURE ?? option(arguments_, "--fixture");
+        const fixtureName = process.env.TOKENMAXX_FIXTURE ?? option(arguments_, "--fixture");
         if (fixtureName !== undefined && process.stdout.isTTY) {
           const [{ buildScenario, FIXTURE_NOW }, { runTuiDashboard }] = await Promise.all([
             import("./tui/fixtures.ts"),
             import("./tui/dashboard.ts"),
           ]);
-          const now = process.env.TOKMAX_NOW ? Number(process.env.TOKMAX_NOW) : FIXTURE_NOW;
+          const now = process.env.TOKENMAXX_NOW ? Number(process.env.TOKENMAXX_NOW) : FIXTURE_NOW;
           await runTuiDashboard(context.paths.managerSocket, {
-            installed: process.env.TOKMAX_INSTALLED !== "false",
+            installed: process.env.TOKENMAXX_INSTALLED !== "false",
             fixture: buildScenario(fixtureName, now),
             now,
           });
@@ -597,7 +597,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
       default:
         throw new ApplicationError(
           "UNKNOWN_COMMAND",
-          `Unknown command ${command}. Run tokmax --help.`,
+          `Unknown command ${command}. Run tokenmaxx --help.`,
         );
     }
   } finally {

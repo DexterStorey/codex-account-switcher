@@ -74,7 +74,7 @@ export const SwitchRotation: React.FC<{ themeName: ThemeName }> = ({ themeName }
   const generation = switched ? 8 : 7;
 
   return (
-    <Frame theme={theme} title="tokmax">
+    <Frame theme={theme} title="tokenmaxx">
       <div style={{ color: theme.fg }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 20 }}>
           <span style={{ color: theme.good, fontSize: 19 }}>OpenAI · Codex</span>

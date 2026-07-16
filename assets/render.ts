@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Renders every Shot in assets.config.ts to a framed PNG (dark + light) by
-// driving the real tokmax TUI through the fixture seam with VHS. Deterministic:
+// driving the real tokenmaxx TUI through the fixture seam with VHS. Deterministic:
 // no daemon, no network, a pinned clock. Re-run any time; images are build
 // products under generated/.
 //
@@ -53,10 +53,10 @@ function tape(shot: Shot, theme: ThemeName, pngPath: string, gifPath: string): s
     "Set WindowBarSize 40",
     "Set BorderRadius 12",
     "Set TypingSpeed 1ms",
-    `Env TOKMAX_FIXTURE "${shot.scenario}"`,
-    `Env TOKMAX_THEME "${theme}"`,
-    `Env TOKMAX_NOW "${FIXTURE_NOW}"`,
-    `Env TOKMAX_INSTALLED "${installed}"`,
+    `Env TOKENMAXX_FIXTURE "${shot.scenario}"`,
+    `Env TOKENMAXX_THEME "${theme}"`,
+    `Env TOKENMAXX_NOW "${FIXTURE_NOW}"`,
+    `Env TOKENMAXX_INSTALLED "${installed}"`,
     `Env TZ "${FIXTURE_TZ}"`,
     `Type "${bun} run ${entry}"`,
     "Enter",

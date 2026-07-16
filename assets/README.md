@@ -1,7 +1,7 @@
-# tokmax assets
+# tokenmaxx assets
 
 Every image and video in the docs is generated from source — no hand-editing.
-The real tokmax TUI is rendered against **synthetic fixtures** with a **pinned
+The real tokenmaxx TUI is rendered against **synthetic fixtures** with a **pinned
 clock**, so frames are deterministic and need no daemon, network, or real
 accounts.
 
@@ -11,8 +11,8 @@ accounts.
 src/tui/fixtures.ts     fabricates schema-valid AnalyticsSnapshots (scenarios)
         │
         ▼
-tokmax --fixture <name>  the real TUI renders that snapshot (hidden seam,
-        │                pinned by TOKMAX_NOW / TOKMAX_THEME / TZ)
+tokenmaxx --fixture <name>  the real TUI renders that snapshot (hidden seam,
+        │                pinned by TOKENMAXX_NOW / TOKENMAXX_THEME / TZ)
         ▼
 assets/assets.config.ts  the shot list: scenario × view × theme × size
         │
@@ -44,7 +44,7 @@ brew install --cask font-jetbrains-mono-nerd-font   # braille + block + symbol g
 - **Preview one live** without rendering:
 
   ```bash
-  TOKMAX_FIXTURE=oneHot TOKMAX_THEME=dark TZ=America/Los_Angeles \
+  TOKENMAXX_FIXTURE=oneHot TOKENMAXX_THEME=dark TZ=America/Los_Angeles \
     bun run src/index.ts        # press ←/→, space, 1–5 to explore
   ```
 

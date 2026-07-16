@@ -156,7 +156,7 @@ function account(seed: AccountSeed, now: number): Account {
         provider: "anthropic",
         externalUserId: null,
         secretReference: null,
-        profilePath: `/tmp/tokmax/claude/${seed.n}`,
+        profilePath: `/tmp/tokenmaxx/claude/${seed.n}`,
       };
 }
 

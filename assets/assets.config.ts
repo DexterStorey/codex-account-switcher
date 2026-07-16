@@ -1,5 +1,5 @@
 // The single source of truth for every generated screenshot. Each Shot renders
-// the real tokmax TUI through the hidden fixture seam (src/tui/fixtures.ts) at a
+// the real tokenmaxx TUI through the hidden fixture seam (src/tui/fixtures.ts) at a
 // pinned clock, then frames it with VHS (macOS window chrome + shadowless dark
 // backdrop). Edit this list — never the images — and re-run `bun run
 // assets:screens`.
@@ -65,16 +65,16 @@ export const SHOTS: readonly Shot[] = [
   {
     name: "analytics",
     scenario: "cruising",
-    height: 900,
-    keys: ["Right"],
-    caption: "Usage over time for both providers — real-time braille charting.",
+    height: 720,
+    keys: ["Tab"],
+    caption: "Combined token throughput across all accounts and both providers.",
   },
   {
-    name: "analytics-codex",
+    name: "analytics-week",
     scenario: "oneHot",
     height: 720,
-    keys: ["Right", "Down"],
-    caption: "One provider, full timeframe axis and live metrics.",
+    keys: ["Tab", "Right"],
+    caption: "Total tokens and ≈ API value over the timeframe.",
   },
   {
     name: "onboarding",

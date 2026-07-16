@@ -1,4 +1,4 @@
-// The tokmax palette, mirrored from src/tui/format.ts so the videos read as the
+// The tokenmaxx palette, mirrored from src/tui/format.ts so the videos read as the
 // same product as the screenshots.
 
 export interface Theme {

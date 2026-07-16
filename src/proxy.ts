@@ -205,7 +205,7 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
       const url = new URL(request.url);
       const route = routeProvider(url.pathname);
       if (route === null) {
-        return new Response("tokmax proxy: unknown route\n", { status: 404 });
+        return new Response("tokenmaxx proxy: unknown route\n", { status: 404 });
       }
       const body =
         request.method === "GET" || request.method === "HEAD"
@@ -224,17 +224,19 @@ export function createProxyHandler(options: ProxyOptions): ProxyHandler {
       try {
         injection = await options.source.resolve(route.provider);
       } catch (error) {
-        return new Response(`tokmax proxy: ${errorMessage(error)}\n`, { status: 502 });
+        return new Response(`tokenmaxx proxy: ${errorMessage(error)}\n`, { status: 502 });
       }
       if (injection === null) {
-        return new Response(`tokmax proxy: no active ${route.provider} account\n`, { status: 503 });
+        return new Response(`tokenmaxx proxy: no active ${route.provider} account\n`, {
+          status: 503,
+        });
       }
 
       let response: Response;
       try {
         response = await send(injection);
       } catch (error) {
-        return new Response(`tokmax proxy: upstream unreachable (${errorMessage(error)})\n`, {
+        return new Response(`tokenmaxx proxy: upstream unreachable (${errorMessage(error)})\n`, {
           status: 502,
         });
       }

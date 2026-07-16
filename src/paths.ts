@@ -18,10 +18,15 @@ const defaultProxyPort = 8459;
 
 export function applicationPaths(environment: NodeJS.ProcessEnv = process.env): ApplicationPaths {
   const root = resolve(
-    environment.TOKMAX_HOME ?? environment.CODEX_AUTH_HOME ?? join(homedir(), ".codex-auth"),
+    environment.TOKENMAXX_HOME ??
+      environment.TOKMAX_HOME ??
+      environment.CODEX_AUTH_HOME ??
+      join(homedir(), ".codex-auth"),
   );
   const runtime = join(root, "runtime");
-  const proxyPort = Number(environment.TOKMAX_PROXY_PORT ?? defaultProxyPort);
+  const proxyPort = Number(
+    environment.TOKENMAXX_PROXY_PORT ?? environment.TOKMAX_PROXY_PORT ?? defaultProxyPort,
+  );
 
   return ApplicationPathsSchema.parse({
     root,

@@ -24,7 +24,11 @@
   "engines": {
     "bun": ">=1.2.0"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": [
     "codex",
     "claude-code",

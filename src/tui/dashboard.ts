@@ -205,7 +205,7 @@ function providerPanel(
           Box(
             { flexDirection: "row", width: "100%" },
             Text({
-              content: `   no accounts — tokmax login ${providerCli[provider]}`,
+              content: `   no accounts — tokenmaxx login ${providerCli[provider]}`,
               fg: rgb(ctx.theme.dim),
             }),
           ),
@@ -259,7 +259,7 @@ function legend(ctx: Ctx, snapshot: DashboardSnapshot): ReturnType<typeof Box> |
       Text({ content: badge.text.replace(/^[⚠·]\s*/, ""), fg: rgb(badge.color) }),
       Text({ content: " ", fg: rgb(ctx.theme.dim) }),
     ]),
-    Text({ content: "— run tokmax list", fg: rgb(ctx.theme.dim) }),
+    Text({ content: "— run tokenmaxx list", fg: rgb(ctx.theme.dim) }),
   );
 }
 
@@ -399,7 +399,7 @@ function analyticsBody(ctx: Ctx, analytics: AnalyticsSnapshot, timeframe: Timefr
   const cols = process.stdout.columns ?? 80;
   const rows = process.stdout.rows ?? 24;
   const width = Math.max(24, Math.min(160, cols - 12));
-  const height = Math.max(4, Math.min(12, rows - 13));
+  const height = Math.max(4, Math.min(10, rows - 16));
   const tokens = analytics.tokens?.timeframes.find((entry) => entry.key === timeframe.key);
   return [timeframeBar(ctx, timeframe), throughputCard(ctx, tokens, timeframe, height, width)];
 }
@@ -443,7 +443,7 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
       : "←→ range · tab accounts · r refresh";
   const header = Box(
     { flexDirection: "row" },
-    Text({ content: "tokmax", fg: rgb(ctx.theme.accent), attributes: 1 }),
+    Text({ content: "tokenmaxx", fg: rgb(ctx.theme.accent), attributes: 1 }),
     Text({ content: `  ${clock}`, fg: rgb(ctx.theme.dim) }),
     Text({ content: `   ↻ ${refreshed}  ·  active 60s / idle 5m`, fg: rgb(ctx.theme.faint) }),
     ...(state.note === "" ? [] : [Text({ content: `   ${state.note}`, fg: rgb(ctx.theme.warn) })]),
@@ -454,7 +454,7 @@ function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewSt
       Box(
         { width: "100%", backgroundColor: rgb(ctx.theme.warn) },
         Text({
-          content: " native routing is off — run  tokmax install  to route codex & claude",
+          content: " native routing is off — run  tokenmaxx install  to route codex & claude",
           fg: rgb(ctx.theme.bg),
           bg: rgb(ctx.theme.warn),
           attributes: 1,

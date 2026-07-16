@@ -13,11 +13,11 @@
   },
   {
     "name": "analytics",
-    "caption": "Usage over time for both providers — real-time braille charting."
+    "caption": "Combined token throughput across all accounts and both providers."
   },
   {
-    "name": "analytics-codex",
-    "caption": "One provider, full timeframe axis and live metrics."
+    "name": "analytics-week",
+    "caption": "Total tokens and ≈ API value over the timeframe."
   },
   {
     "name": "onboarding",

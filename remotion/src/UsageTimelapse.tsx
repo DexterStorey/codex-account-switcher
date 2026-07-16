@@ -72,7 +72,7 @@ export const UsageTimelapse: React.FC<{ themeName: ThemeName }> = ({ themeName }
   const frontierY = CHART.h - (now / 100) * CHART.h;
 
   return (
-    <Frame theme={theme} title="tokmax — analytics">
+    <Frame theme={theme} title="tokenmaxx — analytics">
       <div style={{ color: theme.fg, fontSize: 18 }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 18 }}>
           <span style={{ color: theme.dim }}>

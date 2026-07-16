@@ -4,9 +4,13 @@ import { dirname, join } from "node:path";
 import type { ApplicationPaths } from "./paths.ts";
 import { proxyBaseUrl } from "./paths.ts";
 
-const codexBeginMarker = "# >>> tokmax managed (do not edit) >>>";
-const codexEndMarker = "# <<< tokmax managed <<<";
-const dummyAuthToken = "managed-by-tokmax";
+const codexBeginMarker = "# >>> tokenmaxx managed (do not edit) >>>";
+const codexEndMarker = "# <<< tokenmaxx managed <<<";
+const dummyAuthToken = "managed-by-tokenmaxx";
+const legacyBeginMarkers = [codexBeginMarker, "# >>> tokmax managed (do not edit) >>>"];
+const legacyEndMarkers = [codexEndMarker, "# <<< tokmax managed <<<"];
+const legacyDummyTokens = [dummyAuthToken, "managed-by-tokmax"];
+const disabledPrefix = /^#\s*(?:tokenmaxx|tokmax)-disabled:\s*/;
 
 function codexConfigPath(): string {
   return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
@@ -21,16 +25,20 @@ async function readFileOrEmpty(path: string): Promise<string> {
 }
 
 function stripCodexManagedBlock(content: string): string {
-  const begin = content.indexOf(codexBeginMarker);
-  const end = content.indexOf(codexEndMarker);
   let base = content;
-  if (begin !== -1 && end !== -1 && end > begin) {
-    base = `${content.slice(0, begin)}${content.slice(end + codexEndMarker.length)}`;
+  for (let index = 0; index < legacyBeginMarkers.length; index += 1) {
+    const beginMarker = legacyBeginMarkers[index] ?? "";
+    const endMarker = legacyEndMarkers[index] ?? "";
+    const begin = base.indexOf(beginMarker);
+    const end = base.indexOf(endMarker);
+    if (begin !== -1 && end !== -1 && end > begin) {
+      base = `${base.slice(0, begin)}${base.slice(end + endMarker.length)}`;
+    }
   }
   return base
     .split("\n")
     .map((line) =>
-      /^\s*model_provider\s*=/.test(line) ? `# tokmax-disabled: ${line.trimStart()}` : line,
+      /^\s*model_provider\s*=/.test(line) ? `# tokenmaxx-disabled: ${line.trimStart()}` : line,
     )
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -41,7 +49,7 @@ function restoreCodexContent(content: string): string {
   const stripped = stripCodexManagedBlock(content);
   return `${stripped
     .split("\n")
-    .map((line) => line.replace(/^#\s*tokmax-disabled:\s*/, ""))
+    .map((line) => line.replace(disabledPrefix, ""))
     .join("\n")
     .trimEnd()}\n`;
 }
@@ -50,10 +58,10 @@ export function buildCodexManagedBlock(paths: ApplicationPaths): string {
   const baseUrl = proxyBaseUrl(paths, "openai");
   return [
     codexBeginMarker,
-    `model_provider = "tokmax"`,
+    `model_provider = "tokenmaxx"`,
     "",
-    "[model_providers.tokmax]",
-    `name = "tokmax"`,
+    "[model_providers.tokenmaxx]",
+    `name = "tokenmaxx"`,
     `base_url = "${baseUrl}"`,
     `wire_api = "responses"`,
     codexEndMarker,
@@ -74,7 +82,7 @@ export async function installCodexConfig(paths: ApplicationPaths): Promise<strin
 export async function uninstallCodexConfig(): Promise<string | null> {
   const path = codexConfigPath();
   const existing = await readFile(path, "utf8").catch(() => null);
-  if (existing === null || !existing.includes(codexBeginMarker)) {
+  if (existing === null || !legacyBeginMarkers.some((marker) => existing.includes(marker))) {
     return null;
   }
   await writeFile(path, restoreCodexContent(existing), { mode: 0o600 });
@@ -124,7 +132,8 @@ export async function uninstallClaudeConfig(): Promise<string | null> {
   }
   const { ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ...rest } = settings.env;
   const managed =
-    (ANTHROPIC_AUTH_TOKEN === dummyAuthToken || ANTHROPIC_BASE_URL?.includes("127.0.0.1")) ?? false;
+    (ANTHROPIC_AUTH_TOKEN !== undefined && legacyDummyTokens.includes(ANTHROPIC_AUTH_TOKEN)) ||
+    (ANTHROPIC_BASE_URL?.includes("127.0.0.1") ?? false);
   if (!managed) {
     return null;
   }
@@ -141,7 +150,8 @@ export async function uninstallClaudeConfig(): Promise<string | null> {
 }
 
 export async function isInstalled(): Promise<boolean> {
-  return readFileOrEmpty(codexConfigPath()).then((content) =>
-    content.includes("model_providers.tokmax"),
+  return readFileOrEmpty(codexConfigPath()).then(
+    (content) =>
+      content.includes("model_providers.tokenmaxx") || content.includes("model_providers.tokmax"),
   );
 }

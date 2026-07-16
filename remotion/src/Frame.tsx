@@ -54,9 +54,9 @@ export const Frame: React.FC<{
   </AbsoluteFill>
 );
 
-// The tokmax wordmark, used as a small brand mark in the corner of each video.
+// The tokenmaxx wordmark, used as a small brand mark in the corner of each video.
 export const Wordmark: React.FC<{ theme: Theme; size?: number }> = ({ theme, size = 20 }) => (
   <span style={{ fontWeight: 700, fontSize: size, color: theme.accent, letterSpacing: 0.5 }}>
-    tokmax
+    tokenmaxx
   </span>
 );

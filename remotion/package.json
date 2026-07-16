@@ -1,8 +1,8 @@
 {
-  "name": "tokmax-remotion",
+  "name": "tokenmaxx-remotion",
   "private": true,
   "version": "0.0.0",
-  "description": "Data-driven timelapse + switch-interaction videos for tokmax docs",
+  "description": "Data-driven timelapse + switch-interaction videos for tokenmaxx docs",
   "scripts": {
     "render": "bun run render.ts",
     "studio": "remotion studio src/index.ts"
